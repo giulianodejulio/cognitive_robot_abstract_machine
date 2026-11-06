@@ -194,3 +194,14 @@ basstler/board.json
 # Local data produced by the Python coverage checks.
 /.coverage
 /.coverage.*
+
+# Reproducible real-robot checkout and acquired model resources.
+!/uv.lock
+!semantic_digital_twin/resources/robots/**/*.obj
+!semantic_digital_twin/resources/robots/**/*.png
+!semantic_digital_twin/resources/robots/**/*.jpg
+
+# Large runtime recordings are archived separately from source control.
+/deployment/artifacts/
+*.mcap
+*.db3

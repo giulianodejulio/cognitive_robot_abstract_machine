@@ -1,0 +1,78 @@
+{
+  "wheel_left_actuator: ": {
+    "Position state": {
+      "before": 27.796846,
+      "after": 32.743688,
+      "delta": 4.946842,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Absolute position state": {
+      "before": -66.204214,
+      "after": -76.005273,
+      "delta": -9.80105900000001,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Velocity state": {
+      "before": -0.0,
+      "after": -0.0,
+      "delta": 0.0,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Velocity command": {
+      "before": 0.0,
+      "after": 0.0,
+      "delta": 0.0,
+      "samples": [
+        3,
+        3
+      ]
+    }
+  },
+  "wheel_right_actuator: ": {
+    "Position state": {
+      "before": 31.209664,
+      "after": 36.160189,
+      "delta": 4.9505250000000025,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Absolute position state": {
+      "before": 63.817843,
+      "after": 73.630862,
+      "delta": 9.81301899999999,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Velocity state": {
+      "before": 0.0,
+      "after": 0.0,
+      "delta": 0.0,
+      "samples": [
+        3,
+        3
+      ]
+    },
+    "Velocity command": {
+      "before": 0.0,
+      "after": 0.0,
+      "delta": 0.0,
+      "samples": [
+        3,
+        3
+      ]
+    }
+  }
+}

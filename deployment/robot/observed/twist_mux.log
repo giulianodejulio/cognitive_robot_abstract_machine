@@ -1,0 +1,57 @@
+/twist_mux:
+  ros__parameters:
+    diagnostic_updater:
+      period: 1.0
+      use_fqn: false
+    locks:
+      assisted_teleop:
+        priority: 200
+        timeout: 0.0
+        topic: assisted_teleop_priority
+      charging:
+        priority: 210
+        timeout: 0.0
+        topic: power/is_charging
+      joystick:
+        priority: 100
+        timeout: 0.0
+        topic: joy_priority
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    topics:
+      assisted_teleop:
+        priority: 200
+        timeout: 0.5
+        topic: assisted_vel
+      docking:
+        priority: 210
+        timeout: 0.5
+        topic: docking_vel
+      joystick:
+        priority: 100
+        timeout: 0.5
+        topic: joy_vel
+      keyboard:
+        priority: 90
+        timeout: 0.5
+        topic: key_vel
+      navigation:
+        priority: 10
+        timeout: 0.5
+        topic: cmd_vel
+      rviz:
+        priority: 100
+        timeout: 0.5
+        topic: rviz_joy_vel
+      webgui_joystick:
+        priority: 100
+        timeout: 0.5
+        topic: tab_vel
+    use_sim_time: false
+    use_stamped: true
+

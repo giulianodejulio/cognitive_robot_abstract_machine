@@ -1,0 +1,83 @@
+# Feedback bridge: robot -> laptop, with separate ROS discovery graphs.
+version: v5.0
+
+specs:
+  threads: 2
+  qos:
+    history-depth: 20
+
+xml:
+  files:
+    - /workspace/cram/doc/robocat_dds_router_profiles.xml
+
+allowlist:
+  - name: rt/joint_states
+  - name: rt/direct_laser_odometry/odom
+  - name: rt/mobile_base_controller/odom
+  - name: rt/scan
+  - name: rt/tf
+  - name: rt/tf_static
+  - name: rt/robot_description
+  - name: rt/power/is_emergency
+  - name: rt/power/is_charging
+  - name: rt/joy_priority
+  - name: rt/diagnostics
+
+topics:
+  - name: rt/joint_states
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/direct_laser_odometry/odom
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/mobile_base_controller/odom
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/scan
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/power/is_emergency
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/diagnostics
+    qos:
+      reliability: false
+      durability: false
+  - name: rt/tf
+    qos:
+      reliability: true
+      durability: false
+  - name: rt/joy_priority
+    qos:
+      reliability: true
+      durability: true
+      history-depth: 1
+  - name: rt/robot_description
+    qos:
+      reliability: true
+      durability: true
+      history-depth: 1
+  - name: rt/tf_static
+    qos:
+      reliability: true
+      durability: true
+      history-depth: 20
+
+participants:
+  - name: robocat_humble
+    kind: xml
+    profile: robocat_humble
+  - name: cram_jazzy
+    kind: xml
+    profile: cram_jazzy
+
+routes:
+  - src: robocat_humble
+    dst:
+      - cram_jazzy
+  - src: cram_jazzy

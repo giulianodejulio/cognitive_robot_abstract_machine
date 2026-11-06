@@ -1,8 +1,11 @@
+# %% imports
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from krrood.symbolic_math.symbolic_math import if_less
 from semantic_digital_twin.spatial_types import (
+    Point3,
     Vector3,
     RotationMatrix,
 )
@@ -21,10 +24,12 @@ from giskardpy.motion_statechart.graph_node import Goal, MotionStatechartNode
 from giskardpy.motion_statechart.tasks.cartesian_tasks import (
     CartesianOrientation,
     CartesianPositionStraight,
+    CartesianPositionVelocityLimit,
     CartesianPose,
 )
 
 
+# %% differential base motion
 @dataclass(eq=False, repr=False)
 class DifferentialDriveBaseGoal(Sequence):
     """
@@ -35,7 +40,9 @@ class DifferentialDriveBaseGoal(Sequence):
     3. Orient to goal orientation
 
     The direction to the goal is an expression over the base's forward kinematics, so
-    steps 1 and 2 follow the base as it drives.
+    steps 1 and 2 follow the base as it drives. Initial alignment limits translation
+    to :attr:`translation_velocity_while_turning`. A nearby goal uses its final
+    orientation, and goal height follows the base's current height.
     """
 
     diff_drive_connection: DifferentialDrive | None = field(kw_only=True, default=None)
@@ -64,7 +71,28 @@ class DifferentialDriveBaseGoal(Sequence):
     Threshold when the drive goals for the base are considered achieved.
     """
 
+    orientation_threshold: float | None = field(default=None, kw_only=True)
+    """
+    Angular completion tolerance in radians for the pose phases.
+
+    None uses :attr:`threshold`. Initial alignment also respects
+    :attr:`heading_threshold`.
+    """
+
+    heading_threshold: float = field(default=0.02, kw_only=True)
+    """
+    Maximum heading error in radians before the translation phase starts.
+    """
+
+    translation_velocity_while_turning: float = field(default=0.001, kw_only=True)
+    """
+    Maximum Cartesian translation speed during initial alignment, in meters/second.
+    """
+
     def expand(self, context: MotionStatechartContext) -> None:
+        """
+        Build planar approach phases with bounded translation while aligning.
+        """
         if self.diff_drive_connection is None:
             diff_drives = context.world.get_connections_by_type(DifferentialDrive)
             if len(diff_drives) == 0:
@@ -82,55 +110,90 @@ class DifferentialDriveBaseGoal(Sequence):
                     entity_type=DifferentialDrive,
                 )
             self.diff_drive_connection = diff_drives[0]
-        map = context.world.root
+        root = context.world.root
         tip = self.diff_drive_connection.child
-
-        root_T_goal = context.world.transform(self.goal_pose, map)
-        root_T_current = context.world.compose_forward_kinematics_expression(map, tip)
-        root_V_current_to_goal = root_T_goal.position - root_T_current.position
-        root_V_current_to_goal.scale(1)
-        root_V_z = Vector3.Z(reference_frame=map)
-        root_R_first_orientation = RotationMatrix.from_vectors(
-            x=root_V_current_to_goal, z=root_V_z, reference_frame=map
+        orientation_threshold = (
+            self.threshold
+            if self.orientation_threshold is None
+            else self.orientation_threshold
         )
 
-        root_T_goal2 = Pose(
-            position=root_T_goal.position,
-            orientation=root_R_first_orientation.quaternion,
-            reference_frame=map,
+        given_goal = context.world.transform(self.goal_pose, root)
+        current_pose = context.world.compose_forward_kinematics_expression(root, tip)
+        planar_goal = Pose(
+            position=Point3(
+                given_goal.x,
+                given_goal.y,
+                current_pose.z,
+                reference_frame=root,
+            ),
+            orientation=given_goal.orientation,
+            reference_frame=root,
+        )
+        direction = planar_goal.position - current_pose.position
+        distance = direction.norm()
+        direction.scale(1)
+        vertical_axis = Vector3.Z(reference_frame=root)
+        alignment_rotation = if_less(
+            distance,
+            self.threshold,
+            planar_goal.rotation_matrix,
+            RotationMatrix.from_vectors(
+                x=direction, z=vertical_axis, reference_frame=root
+            ),
+        )
+        alignment_rotation.reference_frame = root
+
+        approach_pose = Pose(
+            position=planar_goal.position,
+            orientation=alignment_rotation.quaternion,
+            reference_frame=root,
         )
 
         self.nodes = [
-            CartesianOrientation(
+            Parallel(
                 name=f"{self.name}/step1",
-                root_link=map,
-                tip_link=tip,
-                goal_orientation=root_R_first_orientation,
-                weight=self.weight,
-                threshold=self.threshold,
+                nodes=[
+                    CartesianOrientation(
+                        name=f"{self.name}/step1/orientation",
+                        root_link=root,
+                        tip_link=tip,
+                        goal_orientation=alignment_rotation,
+                        weight=self.weight,
+                        threshold=min(orientation_threshold, self.heading_threshold),
+                    ),
+                    CartesianPositionVelocityLimit(
+                        name=f"{self.name}/step1/stay_in_place",
+                        root_link=root,
+                        tip_link=tip,
+                        max_linear_velocity=self.translation_velocity_while_turning,
+                        weight=DefaultWeights.WEIGHT_MAXIMUM,
+                    ),
+                ],
             ),
             CartesianPose(
                 name=f"{self.name}/step2",
-                root_link=map,
+                root_link=root,
                 tip_link=tip,
-                goal_pose=root_T_goal2,
+                goal_pose=approach_pose,
                 weight=self.weight,
                 translation_threshold=self.threshold,
-                orientation_threshold=self.threshold,
+                orientation_threshold=orientation_threshold,
             ),
             CartesianPose(
                 name=f"{self.name}/step3",
-                root_link=map,
+                root_link=root,
                 tip_link=tip,
-                goal_pose=root_T_goal,
+                goal_pose=planar_goal,
                 weight=self.weight,
                 translation_threshold=self.threshold,
-                orientation_threshold=self.threshold,
+                orientation_threshold=orientation_threshold,
             ),
         ]
         super().expand(context)
 
 
+# %% Cartesian pose motion
 @dataclass(eq=False, repr=False)
 class CartesianPoseStraight(Parallel):
     """

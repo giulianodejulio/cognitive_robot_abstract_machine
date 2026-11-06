@@ -37,7 +37,7 @@ dev = [
     "pytest-xdist",
     "pytest-rerunfailures",
     "pytest-cov",
-    "setuptools>=68",
+    "setuptools>=68,<80",
     "wheel",
     "objgraph",
     "treon",

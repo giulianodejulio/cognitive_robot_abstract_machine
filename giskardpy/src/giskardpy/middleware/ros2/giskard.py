@@ -79,7 +79,13 @@ class Giskard:
     world_config: WorldConfig
     server_config: GiskardServerConfig
     robot_interface_config: RobotInterfaceConfig
-    qp_controller_config: QPControllerConfig = field(default_factory=QPControllerConfig)
+    qp_controller_config: QPControllerConfig = field(
+        default_factory=QPControllerConfig.create_with_simulation_defaults
+    )
+    """
+    The controller timing and solver settings.
+    """
+
     executor: Executor = field(init=False)
     motion_server: MotionServer = field(init=False)
     world_synchronizer: WorldSynchronizer = field(init=False)
@@ -247,18 +253,24 @@ class Giskard:
     def robots(self) -> List[AbstractRobot]:
         return self.world_config.world.get_semantic_annotations_by_type(AbstractRobot)
 
-    def _controlled_joints_sanity_check(self):
+    def _controlled_joints_sanity_check(self) -> None:
+        """
+        Require a controlled connection, including a robot's mobile drive.
+        """
         world = self.world_config.world
-        movable_joints = world.get_connections_by_type(ActiveConnection)
-        controlled_joints = self.robot.controlled_connections
-        non_controlled_joints = set(movable_joints).difference(set(controlled_joints))
-        if len(controlled_joints) == 0 and len(world.connections) > 0:
+        movable_connections = set(world.get_connections_by_type(ActiveConnection))
+        controlled_connections = {
+            connection for connection in movable_connections if connection.is_controlled
+        }
+        if not controlled_connections and world.connections:
             raise NoControlledJointsError()
-        if len(non_controlled_joints) > 0:
-            rospy.get_node().get_logger().info(
-                f"The following joints are non-fixed according to the urdf, "
-                f"but not flagged as controlled: {[c.name for c in non_controlled_joints]}."
-            )
+        non_controlled_connections = movable_connections - controlled_connections
+        if not non_controlled_connections:
+            return
+        rospy.get_node().get_logger().info(
+            f"The following joints are non-fixed according to the urdf, "
+            f"but not flagged as controlled: {[connection.name for connection in non_controlled_connections]}."
+        )
 
     def live(self):
         """

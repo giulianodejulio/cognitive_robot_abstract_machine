@@ -1,0 +1,6 @@
+foonathan_memory_vendor https://github.com/eProsima/foonathan_memory_vendor.git v1.4.1
+fastcdr https://github.com/eProsima/Fast-CDR.git v2.3.6
+fastdds https://github.com/eProsima/Fast-DDS.git v3.6.2
+dev-utils https://github.com/eProsima/dev-utils.git v1.5.4
+ddspipe https://github.com/eProsima/DDS-Pipe.git v1.5.4
+ddsrouter https://github.com/eProsima/DDS-Router.git v3.5.4

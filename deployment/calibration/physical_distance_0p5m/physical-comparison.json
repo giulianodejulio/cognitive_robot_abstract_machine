@@ -1,0 +1,36 @@
+{
+  "physical_displacement_m": 1.0,
+  "physical_reference": "Operator tape/floor-marker measurement of the same chassis point",
+  "requested_distance_m": 0.5,
+  "commanded_max_linear_m_s": 0.05,
+  "feedback": "wheel",
+  "goal_outcome": "SUCCESS",
+  "odometry": {
+    "wheel": {
+      "sample_counts": [
+        150,
+        150
+      ],
+      "forward_m": 0.4948683028019837,
+      "lateral_m": 3.3604833991701666e-05,
+      "distance_m": 0.49486830394297904,
+      "yaw_degrees": 0.08443700204991338,
+      "physical_to_reported_ratio": 2.02073964331978
+    },
+    "laser": {
+      "sample_counts": [
+        30,
+        22
+      ],
+      "forward_m": 0.9819286476000189,
+      "lateral_m": 0.009844122138103453,
+      "distance_m": 0.9819779914632872,
+      "yaw_degrees": 0.5204577269807129,
+      "physical_to_reported_ratio": 1.0183527621732718
+    }
+  },
+  "wheel_joint_delta_rad": {
+    "wheel_left_joint": 4.946840999780164,
+    "wheel_right_joint": 4.950525259020875
+  }
+}

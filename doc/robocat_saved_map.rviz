@@ -1,0 +1,58 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 45; 45; 45
+    Fixed Frame: map
+    Frame Rate: 5
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: Saved elevator map - provisional
+      Enabled: true
+      Alpha: 1
+      Color Scheme: map
+      Draw Behind: true
+      Topic:
+        Value: /map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: Provisional doorway and staging frames
+      Enabled: true
+      Show Axes: true
+      Show Arrows: true
+      Show Names: true
+      Marker Scale: 0.6
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        map:
+          Value: false
+        elevator_doorway:
+          Value: true
+        elevator_staging:
+          Value: true
+      Value: true
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: map
+      Scale: 65
+      Angle: 0
+      X: 2.5
+      Y: 0
+Window Geometry:
+  Width: 1280
+  Height: 850
+  X: 40
+  Y: 40

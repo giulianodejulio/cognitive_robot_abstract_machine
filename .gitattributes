@@ -1,2 +1,7 @@
-# Preserve verified upstream browser assets byte-for-byte.
-cramera/src/cramera/web/vendor/** -whitespace
+# Preserve acquired assets and raw evidence byte-for-byte, including CRLF.
+semantic_digital_twin/resources/robots/**/meshes/** binary
+deployment/maps/**/*.pgm binary
+deployment/maps/**/*.data binary
+deployment/maps/**/*.posegraph binary
+deployment/calibration/*.json binary
+deployment/provenance/original-worktree.patch binary

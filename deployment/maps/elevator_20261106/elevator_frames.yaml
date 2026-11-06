@@ -1,0 +1,25 @@
+status: provisional_published_native_tf_not_validated_for_navigation
+map_file: elevator.yaml
+frames:
+  elevator_doorway:
+    parent: map
+    x: 6.071249034642173
+    y: -0.7024691198911167
+    z: 0.0
+    yaw: -1.5911630563812496
+  elevator_staging:
+    parent: elevator_doorway
+    x: -1.0
+    y: 0.0
+    z: 0.0
+    yaw: 0.0
+calibration:
+  observed_opening_width_m: 0.8910793084440112
+  door_reference: Mid-depth between closed telescopic leaves; actual floor gap plane
+    not independently measured
+  normal_reference: Measured cabin back wall
+  centre_reference: Open reveals, independently consistent with closed leaf joint
+  staging_distance_m: 1.0
+  live_localization: not enabled for the new map
+  map_alignment: single stationary scan alignment, requires validation
+  position_precision_bound: not established

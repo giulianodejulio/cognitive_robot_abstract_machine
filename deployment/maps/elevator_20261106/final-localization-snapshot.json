@@ -1,0 +1,25 @@
+{
+  "last_slam_pose_raw": [
+    33.33712326191581,
+    20.561764406169484,
+    -0.645861051661011
+  ],
+  "last_slam_stamp": 1793966862.058625,
+  "matched_dlo_delta_seconds": 0.0,
+  "raw_from_odom": [
+    -0.6335010738984082,
+    1.1929177521516223,
+    -0.04188000172382944
+  ],
+  "map_from_dlo_odom": [
+    -31.551525431422828,
+    2.7354709318387354,
+    -0.6410916139375027
+  ],
+  "latest_recorded_base_in_map": [
+    7.435533934395419,
+    -0.463200005123543,
+    -1.2481485855082834
+  ],
+  "note": "Snapshot from final SLAM correction; no live AMCL localization enabled, no TF published"
+}

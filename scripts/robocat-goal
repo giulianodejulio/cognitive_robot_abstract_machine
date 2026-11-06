@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# %% Robocat request endpoint
+set -euo pipefail
+script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+    printf 'Usage: scripts/robocat-goal DISTANCE_METERS|--turn DEGREES|--cancel|--ready [options]\n'
+    printf 'Persistent Robocat client; Ctrl+C cancels this request. Supports --pure-turn and --fifo PATH.\n'
+    exit 0
+fi
+endpoint=(--fifo /tmp/robocat-giskard-goals.fifo)
+for argument in "$@"; do
+    if [[ $argument == --fifo ]]; then endpoint=(); fi
+done
+exec bash "$script_directory/tiago-goal" "$@" "${endpoint[@]}"

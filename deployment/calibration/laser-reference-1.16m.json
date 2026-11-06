@@ -1,0 +1,18 @@
+{
+  "physical_reference_m": 1.16,
+  "scan_count": 31,
+  "frame": "laser_link",
+  "latest_scan_age_seconds": 0.23682737350463867,
+  "central_ray_median_m": 1.1260000467300415,
+  "central_ray_min_m": 1.1260000467300415,
+  "central_ray_max_m": 1.1399999856948853,
+  "front_sector_degrees": 2,
+  "front_projected_median_m": 1.1267647728256722,
+  "difference_from_reference_m": -0.0332352271743277,
+  "ratio_to_reference": 0.9713489420910968,
+  "wheel_samples": 154,
+  "maximum_reported_wheel_speed": {
+    "linear_m_s": 1.0737498533610182e-06,
+    "angular_rad_s": 8.59655298003836e-06
+  }
+}

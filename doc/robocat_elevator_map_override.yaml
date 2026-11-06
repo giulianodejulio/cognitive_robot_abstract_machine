@@ -1,0 +1,3 @@
+/map_server:
+  ros__parameters:
+    yaml_filename: /home/pal/robocat_elevator_mapping_20261106/elevator.yaml

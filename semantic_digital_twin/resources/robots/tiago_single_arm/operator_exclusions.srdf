@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="tiago">
+  <disable_collisions link1="gripper_link" link2="torso_fixed_column_link" reason="OperatorRequested" />
+</robot>

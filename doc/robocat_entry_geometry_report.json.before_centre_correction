@@ -1,0 +1,36 @@
+{
+  "status": "sampled_geometry_pass",
+  "sample_count": 197,
+  "margin_m": 0.1,
+  "start_in_doorway": {
+    "x": -0.9928028112695438,
+    "y": -0.14039613163638243,
+    "yaw": 0.3075498317791299
+  },
+  "staging": {
+    "x": -0.45,
+    "y": 0.0
+  },
+  "target": {
+    "x": 0.6,
+    "y": -0.18296194765602777,
+    "yaw_degrees": -9.884516024204684
+  },
+  "approach_distance": 0.5606656451938004,
+  "entry_distance": 1.065821314428496,
+  "minimum_uninflated_clearances": {
+    "door_jamb": 0.16837113297278355,
+    "left_wall": 0.23217001649797184,
+    "right_wall": 0.319834538142541,
+    "back_wall": 0.8249476255051522
+  },
+  "minimum_inflated_residuals": {
+    "door_jamb": 0.06686434112245065,
+    "left_wall": 0.13066410691201746,
+    "right_wall": 0.2053150323501203,
+    "back_wall": 0.7092657629860906
+  },
+  "violations": [],
+  "target_rearmost_x": 0.27353441367582954,
+  "scope": "Static 2D geometric screening only; not a Giskard trajectory or execution approval. No lobby obstacle, person, gap, height or tracking-error validation."
+}

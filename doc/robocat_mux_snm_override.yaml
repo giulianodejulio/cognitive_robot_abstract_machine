@@ -1,0 +1,8 @@
+# Merge into the existing PAL configuration; retain all native safety locks.
+/twist_mux:
+  ros__parameters:
+    topics:
+      snm:
+        topic: snm_vel
+        timeout: 0.5
+        priority: 20

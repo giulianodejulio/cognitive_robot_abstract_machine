@@ -1,0 +1,6 @@
+# Approximate calibration, 2026-11-06, wheel odometry origin for this session.
+# Door leaf depth discontinuity used as the operator-provided doorway centre.
+# Recalibrate after wheel odometry resets; this is not an automatically detected sill.
+x: 1.664435277547849
+y: 20.183487597099393
+yaw: 0.386938523718141

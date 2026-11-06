@@ -1,0 +1,316 @@
+diff --git a/experiments/pyproject.toml b/experiments/pyproject.toml
+index b96ffcbbb..209613923 100644
+--- a/experiments/pyproject.toml
++++ b/experiments/pyproject.toml
+@@ -26,6 +26,9 @@ include-package-data = true
+ [tool.setuptools.dynamic]
+ version = {attr = "experiments._version.__version__"}
+ 
++[tool.setuptools.package-data]
++"experiments.tiago_monitor" = ["*.js"]
++
+ [dependency-groups]
+ workspace = [
+     "coraplex",
+diff --git a/giskardpy/src/giskardpy/middleware/ros2/giskard.py b/giskardpy/src/giskardpy/middleware/ros2/giskard.py
+index d217f627d..c30a5656a 100644
+--- a/giskardpy/src/giskardpy/middleware/ros2/giskard.py
++++ b/giskardpy/src/giskardpy/middleware/ros2/giskard.py
+@@ -79,7 +79,13 @@ class Giskard:
+     world_config: WorldConfig
+     server_config: GiskardServerConfig
+     robot_interface_config: RobotInterfaceConfig
+-    qp_controller_config: QPControllerConfig = field(default_factory=QPControllerConfig)
++    qp_controller_config: QPControllerConfig = field(
++        default_factory=QPControllerConfig.create_with_simulation_defaults
++    )
++    """
++    The controller timing and solver settings.
++    """
++
+     executor: Executor = field(init=False)
+     motion_server: MotionServer = field(init=False)
+     world_synchronizer: WorldSynchronizer = field(init=False)
+@@ -247,18 +253,24 @@ class Giskard:
+     def robots(self) -> List[AbstractRobot]:
+         return self.world_config.world.get_semantic_annotations_by_type(AbstractRobot)
+ 
+-    def _controlled_joints_sanity_check(self):
++    def _controlled_joints_sanity_check(self) -> None:
++        """
++        Require a controlled connection, including a robot's mobile drive.
++        """
+         world = self.world_config.world
+-        movable_joints = world.get_connections_by_type(ActiveConnection)
+-        controlled_joints = self.robot.controlled_connections
+-        non_controlled_joints = set(movable_joints).difference(set(controlled_joints))
+-        if len(controlled_joints) == 0 and len(world.connections) > 0:
++        movable_connections = set(world.get_connections_by_type(ActiveConnection))
++        controlled_connections = {
++            connection for connection in movable_connections if connection.is_controlled
++        }
++        if not controlled_connections and world.connections:
+             raise NoControlledJointsError()
+-        if len(non_controlled_joints) > 0:
+-            rospy.get_node().get_logger().info(
+-                f"The following joints are non-fixed according to the urdf, "
+-                f"but not flagged as controlled: {[c.name for c in non_controlled_joints]}."
+-            )
++        non_controlled_connections = movable_connections - controlled_connections
++        if not non_controlled_connections:
++            return
++        rospy.get_node().get_logger().info(
++            f"The following joints are non-fixed according to the urdf, "
++            f"but not flagged as controlled: {[connection.name for connection in non_controlled_connections]}."
++        )
+ 
+     def live(self):
+         """
+diff --git a/giskardpy/src/giskardpy/motion_statechart/goals/cartesian_goals.py b/giskardpy/src/giskardpy/motion_statechart/goals/cartesian_goals.py
+index ee62e1af4..3f088e280 100644
+--- a/giskardpy/src/giskardpy/motion_statechart/goals/cartesian_goals.py
++++ b/giskardpy/src/giskardpy/motion_statechart/goals/cartesian_goals.py
+@@ -1,8 +1,11 @@
++# %% imports
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass, field
+ 
++from krrood.symbolic_math.symbolic_math import if_less
+ from semantic_digital_twin.spatial_types import (
++    Point3,
+     Vector3,
+     RotationMatrix,
+ )
+@@ -21,10 +24,12 @@ from giskardpy.motion_statechart.graph_node import Goal, MotionStatechartNode
+ from giskardpy.motion_statechart.tasks.cartesian_tasks import (
+     CartesianOrientation,
+     CartesianPositionStraight,
++    CartesianPositionVelocityLimit,
+     CartesianPose,
+ )
+ 
+ 
++# %% differential base motion
+ @dataclass(eq=False, repr=False)
+ class DifferentialDriveBaseGoal(Sequence):
+     """
+@@ -35,7 +40,9 @@ class DifferentialDriveBaseGoal(Sequence):
+     3. Orient to goal orientation
+ 
+     The direction to the goal is an expression over the base's forward kinematics, so
+-    steps 1 and 2 follow the base as it drives.
++    steps 1 and 2 follow the base as it drives. Initial alignment limits translation
++    to :attr:`translation_velocity_while_turning`. A nearby goal uses its final
++    orientation, and goal height follows the base's current height.
+     """
+ 
+     diff_drive_connection: DifferentialDrive | None = field(kw_only=True, default=None)
+@@ -64,7 +71,28 @@ class DifferentialDriveBaseGoal(Sequence):
+     Threshold when the drive goals for the base are considered achieved.
+     """
+ 
++    orientation_threshold: float | None = field(default=None, kw_only=True)
++    """
++    Angular completion tolerance in radians for the pose phases.
++
++    None uses :attr:`threshold`. Initial alignment also respects
++    :attr:`heading_threshold`.
++    """
++
++    heading_threshold: float = field(default=0.02, kw_only=True)
++    """
++    Maximum heading error in radians before the translation phase starts.
++    """
++
++    translation_velocity_while_turning: float = field(default=0.001, kw_only=True)
++    """
++    Maximum Cartesian translation speed during initial alignment, in meters/second.
++    """
++
+     def expand(self, context: MotionStatechartContext) -> None:
++        """
++        Build planar approach phases with bounded translation while aligning.
++        """
+         if self.diff_drive_connection is None:
+             diff_drives = context.world.get_connections_by_type(DifferentialDrive)
+             if len(diff_drives) == 0:
+@@ -82,55 +110,90 @@ class DifferentialDriveBaseGoal(Sequence):
+                     entity_type=DifferentialDrive,
+                 )
+             self.diff_drive_connection = diff_drives[0]
+-        map = context.world.root
++        root = context.world.root
+         tip = self.diff_drive_connection.child
++        orientation_threshold = (
++            self.threshold
++            if self.orientation_threshold is None
++            else self.orientation_threshold
++        )
+ 
+-        root_T_goal = context.world.transform(self.goal_pose, map)
+-        root_T_current = context.world.compose_forward_kinematics_expression(map, tip)
+-        root_V_current_to_goal = root_T_goal.position - root_T_current.position
+-        root_V_current_to_goal.scale(1)
+-        root_V_z = Vector3.Z(reference_frame=map)
+-        root_R_first_orientation = RotationMatrix.from_vectors(
+-            x=root_V_current_to_goal, z=root_V_z, reference_frame=map
++        given_goal = context.world.transform(self.goal_pose, root)
++        current_pose = context.world.compose_forward_kinematics_expression(root, tip)
++        planar_goal = Pose(
++            position=Point3(
++                given_goal.x,
++                given_goal.y,
++                current_pose.z,
++                reference_frame=root,
++            ),
++            orientation=given_goal.orientation,
++            reference_frame=root,
++        )
++        direction = planar_goal.position - current_pose.position
++        distance = direction.norm()
++        direction.scale(1)
++        vertical_axis = Vector3.Z(reference_frame=root)
++        alignment_rotation = if_less(
++            distance,
++            self.threshold,
++            planar_goal.rotation_matrix,
++            RotationMatrix.from_vectors(
++                x=direction, z=vertical_axis, reference_frame=root
++            ),
+         )
++        alignment_rotation.reference_frame = root
+ 
+-        root_T_goal2 = Pose(
+-            position=root_T_goal.position,
+-            orientation=root_R_first_orientation.quaternion,
+-            reference_frame=map,
++        approach_pose = Pose(
++            position=planar_goal.position,
++            orientation=alignment_rotation.quaternion,
++            reference_frame=root,
+         )
+ 
+         self.nodes = [
+-            CartesianOrientation(
++            Parallel(
+                 name=f"{self.name}/step1",
+-                root_link=map,
+-                tip_link=tip,
+-                goal_orientation=root_R_first_orientation,
+-                weight=self.weight,
+-                threshold=self.threshold,
++                nodes=[
++                    CartesianOrientation(
++                        name=f"{self.name}/step1/orientation",
++                        root_link=root,
++                        tip_link=tip,
++                        goal_orientation=alignment_rotation,
++                        weight=self.weight,
++                        threshold=min(orientation_threshold, self.heading_threshold),
++                    ),
++                    CartesianPositionVelocityLimit(
++                        name=f"{self.name}/step1/stay_in_place",
++                        root_link=root,
++                        tip_link=tip,
++                        max_linear_velocity=self.translation_velocity_while_turning,
++                        weight=DefaultWeights.WEIGHT_MAXIMUM,
++                    ),
++                ],
+             ),
+             CartesianPose(
+                 name=f"{self.name}/step2",
+-                root_link=map,
++                root_link=root,
+                 tip_link=tip,
+-                goal_pose=root_T_goal2,
++                goal_pose=approach_pose,
+                 weight=self.weight,
+                 translation_threshold=self.threshold,
+-                orientation_threshold=self.threshold,
++                orientation_threshold=orientation_threshold,
+             ),
+             CartesianPose(
+                 name=f"{self.name}/step3",
+-                root_link=map,
++                root_link=root,
+                 tip_link=tip,
+-                goal_pose=root_T_goal,
++                goal_pose=planar_goal,
+                 weight=self.weight,
+                 translation_threshold=self.threshold,
+-                orientation_threshold=self.threshold,
++                orientation_threshold=orientation_threshold,
+             ),
+         ]
+         super().expand(context)
+ 
+ 
++# %% Cartesian pose motion
+ @dataclass(eq=False, repr=False)
+ class CartesianPoseStraight(Parallel):
+     """
+diff --git a/pyproject.toml b/pyproject.toml
+index b9711b690..8b35182d4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -37,7 +37,7 @@ dev = [
+     "pytest-xdist",
+     "pytest-rerunfailures",
+     "pytest-cov",
+-    "setuptools>=68",
++    "setuptools>=68,<80",
+     "wheel",
+     "objgraph",
+     "treon",
+diff --git a/semantic_digital_twin/src/semantic_digital_twin/adapters/ros/latest_message_subscriber.py b/semantic_digital_twin/src/semantic_digital_twin/adapters/ros/latest_message_subscriber.py
+index d83efc7ec..894fd2f04 100644
+--- a/semantic_digital_twin/src/semantic_digital_twin/adapters/ros/latest_message_subscriber.py
++++ b/semantic_digital_twin/src/semantic_digital_twin/adapters/ros/latest_message_subscriber.py
+@@ -4,9 +4,11 @@ from abc import ABC
+ from dataclasses import dataclass, field
+ 
+ from rclpy.subscription import Subscription
++from rclpy.qos import QoSProfile
+ from typing_extensions import Generic, Type, TypeVar
+ 
+ from krrood.patterns.subclass_safe_generic import SubClassSafeGeneric
++from krrood.ormatic.utils import classproperty
+ from semantic_digital_twin.adapters.ros.ros2_node import HasROS2Node
+ from semantic_digital_twin.exceptions import UnboundMessageTypeError
+ 
+@@ -14,7 +16,9 @@ MessageType = TypeVar("MessageType")
+ 
+ 
+ @dataclass
+-class LatestMessageSubscriber(Generic[MessageType], SubClassSafeGeneric, HasROS2Node, ABC):
++class LatestMessageSubscriber(
++    Generic[MessageType], SubClassSafeGeneric, HasROS2Node, ABC
++):
+     """
+     Subscribes to a topic and keeps the most recently received message.
+ 
+@@ -37,11 +41,21 @@ class LatestMessageSubscriber(Generic[MessageType], SubClassSafeGeneric, HasROS2
+     The subscription feeding :attr:`latest_message`.
+     """
+ 
+-    def __post_init__(self):
++    @classproperty
++    def qos_profile(cls) -> QoSProfile:
++        """
++        The subscription policy requested by this subscriber class.
++        """
++        return QoSProfile(depth=1)
++
++    def __post_init__(self) -> None:
++        """
++        Subscribe to the normalized topic using the class's requested policy.
++        """
+         if not self.topic_name.startswith("/"):
+             self.topic_name = f"/{self.topic_name}"
+         self.subscription = self.node.create_subscription(
+-            self.message_type(), self.topic_name, self.buffer_message, 1
++            self.message_type(), self.topic_name, self.buffer_message, self.qos_profile
+         )
+         self.node.get_logger().info(f"Subscribed to {self.topic_name}")
+ 

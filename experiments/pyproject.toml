@@ -26,6 +26,9 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = {attr = "experiments._version.__version__"}
 
+[tool.setuptools.package-data]
+"experiments.tiago_monitor" = ["*.js"]
+
 [dependency-groups]
 workspace = [
     "coraplex",

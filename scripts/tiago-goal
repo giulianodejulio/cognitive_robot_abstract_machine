@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# %% arguments
+set -euo pipefail
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+    echo "Usage: scripts/tiago-goal DISTANCE_METERS|--turn DEGREES|--cancel|--ready [--fifo PATH] [--no-wait] [--cancel-after SECONDS] [--differential-drive] [--pure-turn]"
+    echo "Wait for the real goal result; Ctrl+C cancels only this request."
+    exit 0
+fi
+if (($# < 1)); then
+    echo "Usage: scripts/tiago-goal DISTANCE_METERS|--cancel [--fifo PATH] [--no-wait]" >&2
+    exit 2
+fi
+request=$1
+shift
+turn_request=false
+if [[ $request == --turn ]]; then
+    if (($# < 1)); then echo "Expected --turn DEGREES" >&2; exit 2; fi
+    request=$1
+    shift
+    turn_request=true
+fi
+fifo=/tmp/tiago-giskard-goals.fifo
+wait_result=true
+auto_cancel_after=
+differential_drive=false
+pure_turn=false
+while (($#)); do
+    case "$1" in
+        --fifo)
+            if (($# < 2)); then echo "Expected --fifo PATH" >&2; exit 2; fi
+            fifo=$2; shift 2 ;;
+        --no-wait) wait_result=false; shift ;;
+        --differential-drive) differential_drive=true; shift ;;
+        --pure-turn) pure_turn=true; shift ;;
+        --cancel-after)
+            if (($# < 2)); then echo "Expected --cancel-after SECONDS" >&2; exit 2; fi
+            auto_cancel_after=$2; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+number='^\+?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$'
+if [[ $turn_request == true ]]; then
+    signed_number='^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$'
+    if [[ ! $request =~ $signed_number ]] ||
+       ! LC_ALL=C awk -v angle="$request" 'BEGIN { value = angle + 0; exit !(value != 0 && value >= -180 && value <= 180) }'; then
+        echo "Turn must be finite, nonzero and within +/-180 degrees" >&2
+        exit 2
+    fi
+elif [[ $request == --cancel ]]; then
+    request=cancel
+elif [[ $request == --ready ]]; then
+    request=ready
+elif [[ ! $request =~ $number ]] || ! LC_ALL=C awk -v distance="$request" 'BEGIN { value = distance + 0; exit !(value > 0 && sprintf("%g", value) !~ /[iInN]/) }'; then
+    echo "Distance must be a positive finite number of meters" >&2
+    exit 2
+fi
+if [[ -n $auto_cancel_after ]]; then
+    if [[ $request == cancel || $request == ready || $wait_result == false ]] ||
+       [[ ! $auto_cancel_after =~ $number ]] ||
+       ! LC_ALL=C awk -v delay="$auto_cancel_after" 'BEGIN { value = delay + 0; exit !(value > 0 && sprintf("%g", value) !~ /[iInN]/) }'; then
+        echo "--cancel-after requires a waiting distance request and positive finite seconds" >&2
+        exit 2
+    fi
+fi
+if [[ ( $request == ready || $turn_request == true ) && $wait_result == false ]]; then
+    echo "Readiness and turn requests require a reply; omit --no-wait" >&2
+    exit 2
+fi
+if [[ $differential_drive == true && ( $turn_request == true || $request == ready || $request == cancel || $wait_result == false ) ]]; then
+    echo "--differential-drive requires a waiting forward-distance request" >&2
+    exit 2
+fi
+if [[ $pure_turn == true && $turn_request == false ]]; then
+    echo "--pure-turn requires --turn DEGREES" >&2
+    exit 2
+fi
+
+# %% send without creating files or waiting for an absent reader
+if [[ ! -p $fifo || -L $fifo ]]; then
+    echo "Persistent client pipe not available: $fifo. Start the launcher first." >&2
+    exit 1
+fi
+deliver() {
+    printf '%s\n' "$1" | timeout 2 dd of="$fifo" conv=nocreat oflag=nonblock status=none
+}
+if [[ $request == cancel || $wait_result == false ]]; then
+    if ! deliver "$request"; then
+        echo "Could not deliver the request: check the persistent client." >&2
+        exit 1
+    fi
+    echo "Request delivered: $request. Check the client log for acceptance and result."
+    exit 0
+fi
+
+# %% foreground request ownership and Ctrl+C
+umask 077
+request_directory=$(mktemp -d /tmp/tiago-goal.XXXXXX)
+request_id=${request_directory##*/}
+reply=$request_directory/status
+: > "$reply"
+canceling=false
+cancel_deadline=0
+cancel_timer=
+sender_pid=$$
+cleanup_request() {
+    if [[ -n $cancel_timer ]]; then
+        kill -TERM "$cancel_timer" 2>/dev/null || true
+        wait "$cancel_timer" 2>/dev/null || true
+    fi
+    rm -rf -- "$request_directory"
+}
+trap cleanup_request EXIT
+cancel_owned() {
+    if [[ $canceling == false ]]; then
+        canceling=true
+        cancel_deadline=$((SECONDS + 10))
+        if deliver "cancel $request_id"; then
+            echo "Cancellation requested; waiting for the client result..."
+        else
+            echo "Cancellation delivery failed; check the robot and client log." >&2
+        fi
+    fi
+}
+trap cancel_owned INT
+trap 'cancel_owned; exit 143' TERM HUP
+if [[ $pure_turn == true ]]; then
+    payload="pure-turn $request_id $request $reply"
+elif [[ $differential_drive == true ]]; then
+    payload="differential $request_id $request $reply"
+elif [[ $turn_request == true ]]; then
+    payload="turn $request_id $request $reply"
+elif [[ $request == ready ]]; then
+    payload="ready $request_id $reply"
+else
+    payload="request $request_id $request $reply"
+fi
+if ! deliver "$payload"; then
+    echo "Could not deliver the goal: check the persistent client." >&2
+    exit 1
+fi
+if [[ $turn_request == true ]]; then
+    echo "Turn $request deg sent. Ctrl+C cancels this goal; server and client remain active."
+elif [[ $request != ready ]]; then
+    echo "Goal $request m sent. Ctrl+C cancels this goal; server and client remain active."
+fi
+deadline=$((SECONDS + 75))
+while true; do
+    response=
+    IFS= read -r response < "$reply" || true
+    case "$response" in
+        succeeded) echo "SUCCESS"; exit 0 ;;
+        canceled) echo "CANCELED"; exit 130 ;;
+        rejected|failed) echo "Goal $response; see the client log." >&2; exit 1 ;;
+        ready) echo "READY: wheels settled and interlocks released"; exit 0 ;;
+        blocked) echo "NOT READY"; exit 3 ;;
+        moving)
+            if [[ -n $auto_cancel_after && -z $cancel_timer && $canceling == false ]]; then
+                (sleep "$auto_cancel_after"; kill -INT "$sender_pid" 2>/dev/null || true) &
+                cancel_timer=$!
+                echo "Movement detected; Ctrl+C will be sent in $auto_cancel_after s."
+            fi ;;
+    esac
+    if [[ $canceling == false ]] && ((SECONDS >= deadline)); then
+        echo "Timed out waiting for the client result." >&2
+        cancel_owned
+    fi
+    if [[ $canceling == true ]] && ((SECONDS >= cancel_deadline)); then
+        echo "Cancellation not confirmed; check the robot and client log." >&2
+        exit 1
+    fi
+    sleep 0.1 || true
+done

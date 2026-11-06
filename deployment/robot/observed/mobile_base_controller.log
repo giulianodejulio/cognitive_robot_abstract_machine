@@ -1,0 +1,77 @@
+/mobile_base_controller:
+  ros__parameters:
+    angular:
+      z:
+        has_acceleration_limits: true
+        has_jerk_limits: true
+        has_velocity_limits: true
+        max_acceleration: 1.0
+        max_acceleration_reverse: .nan
+        max_deceleration: .nan
+        max_deceleration_reverse: .nan
+        max_jerk: 5.0
+        max_velocity: 1.5
+        min_acceleration: .nan
+        min_jerk: -5.0
+        min_velocity: .nan
+    base_frame_id: base_footprint
+    cmd_vel_timeout: 0.25
+    enable_odom_tf: false
+    enable_pose_covariance_update: true
+    error_constant_left: 0.001
+    error_constant_right: 0.001
+    is_async: false
+    left_wheel_names:
+    - wheel_left_joint
+    left_wheel_radius_multiplier: 2.0
+    linear:
+      x:
+        has_acceleration_limits: true
+        has_jerk_limits: true
+        has_velocity_limits: true
+        max_acceleration: 0.6
+        max_acceleration_reverse: .nan
+        max_deceleration: .nan
+        max_deceleration_reverse: .nan
+        max_jerk: 2.0
+        max_velocity: 1.0
+        min_acceleration: .nan
+        min_jerk: -2.0
+        min_velocity: -0.2
+    odom_frame_id: odom
+    open_loop: false
+    pose_covariance_diagonal:
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.01
+    position_feedback: true
+    preserve_turning_radius: true
+    publish_cmd: true
+    publish_limited_velocity: true
+    publish_rate: 50.0
+    publish_wheel_data: true
+    right_wheel_names:
+    - wheel_right_joint
+    right_wheel_radius_multiplier: 2.0
+    tf_frame_prefix: ''
+    tf_frame_prefix_enable: true
+    thread_priority: -100
+    twist_covariance_diagonal:
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.001
+    - 0.01
+    type: diff_drive_controller/DiffDriveController
+    update_rate: 100
+    use_sim_time: false
+    use_stamped_vel: false
+    velocity_rolling_window_size: 10
+    wheel_radius: 0.1
+    wheel_separation: 0.25
+    wheel_separation_multiplier: 1.22
+

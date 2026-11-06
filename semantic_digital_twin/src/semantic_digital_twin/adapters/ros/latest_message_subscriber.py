@@ -4,9 +4,11 @@ from abc import ABC
 from dataclasses import dataclass, field
 
 from rclpy.subscription import Subscription
+from rclpy.qos import QoSProfile
 from typing_extensions import Generic, Type, TypeVar
 
 from krrood.patterns.subclass_safe_generic import SubClassSafeGeneric
+from krrood.ormatic.utils import classproperty
 from semantic_digital_twin.adapters.ros.ros2_node import HasROS2Node
 from semantic_digital_twin.exceptions import UnboundMessageTypeError
 
@@ -14,7 +16,9 @@ MessageType = TypeVar("MessageType")
 
 
 @dataclass
-class LatestMessageSubscriber(Generic[MessageType], SubClassSafeGeneric, HasROS2Node, ABC):
+class LatestMessageSubscriber(
+    Generic[MessageType], SubClassSafeGeneric, HasROS2Node, ABC
+):
     """
     Subscribes to a topic and keeps the most recently received message.
 
@@ -37,11 +41,21 @@ class LatestMessageSubscriber(Generic[MessageType], SubClassSafeGeneric, HasROS2
     The subscription feeding :attr:`latest_message`.
     """
 
-    def __post_init__(self):
+    @classproperty
+    def qos_profile(cls) -> QoSProfile:
+        """
+        The subscription policy requested by this subscriber class.
+        """
+        return QoSProfile(depth=1)
+
+    def __post_init__(self) -> None:
+        """
+        Subscribe to the normalized topic using the class's requested policy.
+        """
         if not self.topic_name.startswith("/"):
             self.topic_name = f"/{self.topic_name}"
         self.subscription = self.node.create_subscription(
-            self.message_type(), self.topic_name, self.buffer_message, 1
+            self.message_type(), self.topic_name, self.buffer_message, self.qos_profile
         )
         self.node.get_logger().info(f"Subscribed to {self.topic_name}")
 

@@ -1,0 +1,5 @@
+# Calibrated centre retained; yaw corrected from the cabin back wall, 2026-11-06.
+# Wheel-odometry session reference; recalibrate after odometry reset.
+x: 1.664435277547849
+y: 20.183487597099393
+yaw: 0.2865285580961548

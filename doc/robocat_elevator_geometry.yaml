@@ -1,0 +1,32 @@
+# Door-centred local 2D proposal; not an execution configuration.
+# Side walls: y=a+b*x. Back wall: x=a+b*y.
+doorway:
+  calibration_file: robocat_elevator_doorway.yaml
+  opening_width: 0.9
+  corridor_width: 0.6
+walls:
+  left:
+    intercept: 0.4469763749275091
+    slope: 0.004169362446330789
+  right:
+    intercept: -0.6269133327060268
+    slope: -0.014147591668893955
+  back:
+    intercept: 1.6145844025372842
+    slope: 0.0
+robot_footprint:
+  minimum_x: -0.29649999737739563
+  maximum_x: 0.1576094627380371
+  minimum_y: -0.20020000636577606
+  maximum_y: 0.20020000636577606
+screening:
+  requested_clearance: 0.1
+  translation_sample_step: 0.01
+  rotation_sample_degrees: 1.0
+candidate:
+  staging_x: -0.45
+  staging_y: 0.0
+  target_x: 0.6
+  target_on_measured_cabin_centreline: true
+  retain_straight_segment_heading_at_target: true
+  executable_goal_prepared: false

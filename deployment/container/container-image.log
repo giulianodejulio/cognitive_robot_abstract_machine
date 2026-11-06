@@ -1,0 +1,4 @@
+image=tiago-cram-real:local
+image_id=sha256:a78e25f91976fe7f17c584b922ac52aa4e80dd36c4e30e4d20b79f428e693b7e
+network=host
+working_directory=/workspace/cram
