@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Record only the entry investigation topics; run inside the CRAM container.
+set -eo pipefail
+if (($# > 1)); then printf 'Usage: bash scripts/robocat-record-entry [OUTPUT_DIRECTORY]\n' >&2; exit 2; fi
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ ! -r /opt/ros/overlay_ws/install/setup.bash ]]; then
+    printf 'Run this script inside aicor-cram-demo.\n' >&2; exit 2
+fi
+source /opt/ros/overlay_ws/install/setup.bash
+export ROS_DOMAIN_ID=103 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$repository/doc/robocat_cyclonedds.xml"
+cd "$repository"
+output=${1:-$repository/tmp/robocat-entry-bags/entry-$(date +%Y%m%d-%H%M%S)}
+mkdir -p -- "$(dirname "$output")"
+printf 'Recording: %s\nNo movement goal is sent. Stop with Ctrl+C a few seconds after the trial ends.\n' "$output"
+exec ros2 bag record -s sqlite3 --include-hidden-topics \
+    --qos-profile-overrides-path "$repository/doc/robocat_entry_bag_qos.yaml" \
+    -o "$output" \
+    /snm/pose_comparison /snm/entry_state /snm_vel /giskard/goal_diagnostics \
+    /scan /direct_laser_odometry/odom /mobile_base_controller/odom \
+    /joint_states /diagnostics /power/is_emergency /joy_priority \
+    /tf /tf_static /map /robot_description /entry_preview_markers /rosout \
+    /giskard/command/_action/status

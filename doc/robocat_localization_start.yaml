@@ -1,0 +1,58 @@
+name: localization_start
+eulero_key: labora_demo/labora_floor/localization_start
+parent_key: labora_demo/labora_floor
+frame_id: map
+map_fingerprint: 3ba2bccaa15358b35cd0539ba59ddc991c5a8f416e6279e5df5973440b35f0ae
+captured_at:
+  sec: 1794571220
+  nanosec: 664626836
+is_active: true
+is_enabled: true
+pose:
+  position:
+    x: 16.683926863686825
+    y: -27.721608933207687
+    z: 0.0
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: 0.09665800240417369
+    w: 0.9953176530993685
+yaw_radians: 0.1936182952543307
+initial_pose_covariance:
+- 0.06756237270087695
+- -0.05588637160803955
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- -0.05588637160803955
+- 0.11104678207777852
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.07748407323789794

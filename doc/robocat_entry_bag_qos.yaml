@@ -1,0 +1,90 @@
+/scan:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/tf:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 100
+/tf_static:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 100
+/robot_description:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 1
+/entry_preview_markers:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 1
+/direct_laser_odometry/odom:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/mobile_base_controller/odom:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/joint_states:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/diagnostics:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/power/is_emergency:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/joy_priority:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 1
+/map:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 1
+/snm/pose_comparison:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/snm/entry_state:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 10
+/snm_vel:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 10
+/rosout:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 100
+/giskard/command/_action/status:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 10
+/giskard/goal_diagnostics:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 100

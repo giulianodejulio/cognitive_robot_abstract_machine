@@ -52,6 +52,26 @@ class RobocatTopic(StrEnum):
     DIAGNOSTICS = "/diagnostics"
 
 
+class FeedbackSource(StrEnum):
+    """
+    Odometry whose coordinates the Giskard controller uses.
+    """
+
+    LASER = "laser"
+    WHEEL = "wheel"
+
+    @property
+    def topic(self) -> RobocatTopic:
+        """
+        The sensor topic providing this controller's base pose.
+        """
+        return (
+            RobocatTopic.ODOMETRY
+            if self is FeedbackSource.LASER
+            else RobocatTopic.WHEELS
+        )
+
+
 @dataclass
 class RobocatFeedback(BaseFeedback):
     """
@@ -66,6 +86,11 @@ class RobocatFeedback(BaseFeedback):
     maximum_age: float = 2.0
     """
     Maximum tolerated age of periodic safety feedback, in seconds.
+    """
+
+    active_priorities: tuple[str, ...] = ("0", "10")
+    """
+    Mux priorities permitted while the selected command source is active.
     """
 
     def __post_init__(self) -> None:
@@ -124,7 +149,10 @@ class RobocatFeedback(BaseFeedback):
             receipt = self.received_at.get(topic)
             if receipt is None or now - receipt > self.maximum_age:
                 reasons.append(f"{topic}: safety stream missing or stale")
-        if not require_free_mux and self.mux.get("current priority") not in ("0", "10"):
+        if (
+            not require_free_mux
+            and self.mux.get("current priority") not in self.active_priorities
+        ):
             reasons.append("mux owned by another command source")
         if self.wheel_odometry is None:
             reasons.append("missing wheel odometry")

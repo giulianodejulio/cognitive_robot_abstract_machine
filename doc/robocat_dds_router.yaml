@@ -22,8 +22,17 @@ allowlist:
   - name: rt/power/is_charging
   - name: rt/joy_priority
   - name: rt/diagnostics
+  - name: rt/map
+  - name: rt/amcl_pose
+  - name: rt/robocat_waypoint/target
+  - name: rt/plan
 
 topics:
+  - name: rt/plan
+    qos:
+      reliability: true
+      durability: false
+      history-depth: 1
   - name: rt/joint_states
     qos:
       reliability: false
@@ -52,6 +61,21 @@ topics:
     qos:
       reliability: true
       durability: false
+  - name: rt/map
+    qos:
+      reliability: true
+      durability: true
+      history-depth: 1
+  - name: rt/amcl_pose
+    qos:
+      reliability: true
+      durability: true
+      history-depth: 1
+  - name: rt/robocat_waypoint/target
+    qos:
+      reliability: true
+      durability: false
+      history-depth: 1
   - name: rt/joy_priority
     qos:
       reliability: true

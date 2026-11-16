@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Temporary test Byobu session. Never owns or stops infrastructure.
+set -euo pipefail
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+session=robocat-elevator
+infra=robocat-infra
+attach=true
+plan=false
+while (($#)); do
+    case "$1" in
+        --session)
+            if (($# < 2)); then printf 'Missing --session value\n' >&2; exit 2; fi
+            session=$2; shift 2 ;;
+        --no-attach) attach=false; shift ;;
+        --plan) plan=true; shift ;;
+        --help|-h)
+            printf 'Usage: bash scripts/robocat-byobu [--session NAME] [--no-attach] [--plan]\n'
+            printf 'Creates temporary snm and robot windows using the persistent robocat-infra session.\n'
+            exit 0 ;;
+        *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+if [[ ! $session =~ ^[[:alnum:]_-]+$ || $session == "$infra" ]]; then
+    printf 'Invalid/infra-reserved test session name\n' >&2; exit 2
+fi
+if [[ $plan == true ]]; then
+    printf 'Infra: %s (must already be prepared, DDS and Giskard ready)\n' "$infra"
+    printf 'Temporary session: %s; snm + robot windows; no infrastructure lifecycle changes\n' "$session"
+    printf 'F6 detaches; byobu-tmux kill-session -t %s closes test windows only\n' "$session"
+    exit 0
+fi
+command -v byobu-tmux >/dev/null
+command -v docker >/dev/null
+exec 9>"/tmp/robocat-byobu.$UID.$session.lock"
+flock -x 9
+if byobu-tmux has-session -t "$session" 9>&- 2>/dev/null; then
+    flock -u 9; exec 9>&-
+    if [[ $attach == true ]]; then exec byobu-tmux attach-session -t "$session"; fi
+    exit 0
+fi
+if ! byobu-tmux has-session -t "$infra" 9>&- 2>/dev/null; then
+    printf 'Persistent infrastructure missing. Run bash scripts/robocat-infra start first.\n' >&2; exit 1
+fi
+infra_directory=$(byobu-tmux show-option -qv -t "$infra" @robocat_run_directory 9>&-)
+if [[ -z $infra_directory ]]; then printf 'Infra run directory missing\n' >&2; exit 1; fi
+for role in prepare dds giskard; do
+    if [[ ! -f $infra_directory/$role.ready || -f $infra_directory/$role.failed ]]; then
+        printf 'Infrastructure %s is not ready; inspect infrastructure Byobu window.\n' "$role" >&2; exit 1
+    fi
+
+    # Preparation is a one-shot operation: successful closure is expected.
+    if [[ $role != prepare && -f $infra_directory/$role.closed ]]; then
+        printf 'Infrastructure %s has stopped.\n' "$role" >&2; exit 1
+    fi
+done
+for name in robocat-dds-router aicor-cram-demo; do
+    if ! docker inspect "$name" --format '{{.State.Running}}' 9>&- 2>/dev/null | grep -qx true; then
+        printf 'Required Docker container is not running: %s\n' "$name" >&2; exit 1
+    fi
+done
+# The entry script performs its own runtime safety preflight.
+registration_directory="$infra_directory/test_sessions"
+mkdir -p "$registration_directory"
+shopt -s nullglob
+for record in "$registration_directory"/*.active; do
+    registered_session=$(cat "$record")
+    if ! byobu-tmux has-session -t "=$registered_session" 9>&- 2>/dev/null; then
+        printf 'Previous test session cleanup is not confirmed: %s\nInspect its cleanup.log before retrying.\n' "$record" >&2
+        exit 1
+    fi
+done
+run_directory=$(mktemp -d /tmp/robocat-test.XXXXXX)
+session_record="$registration_directory/$(basename "$run_directory").active"
+printf '%s\n' "$session" > "$session_record"
+for role in snm robot; do
+    printf -v command '%q ' bash "$repository/scripts/robocat_test_window.sh" "$role" "$run_directory" "$session_record"
+    if [[ $role == snm ]]; then
+        byobu-tmux new-session -d -s "$session" -n "$role" -c "$repository" "$command" 9>&-
+    else
+        byobu-tmux new-window -t "$session:" -n "$role" -c "$repository" "$command" 9>&-
+    fi
+done
+byobu-tmux set-option -t "$session" @robocat_test_infra "$infra" 9>&-
+byobu-tmux set-option -t "$session" @robocat_run_directory "$run_directory" 9>&-
+byobu-tmux select-window -t "$session:snm" 9>&-
+flock -u 9; exec 9>&-
+if [[ $attach == true ]]; then exec byobu-tmux attach-session -t "$session"; fi

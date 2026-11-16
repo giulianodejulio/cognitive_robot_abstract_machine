@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# %% temporary clock lifecycle (laptop host)
+set -euo pipefail
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+configuration="$repository/config/robocat_clock/90-robocat-client.conf"
+directory=/run/systemd/timesyncd.conf.d
+override="$directory/90-robocat-client.conf"
+operation=${1:-}
+
+restore() {
+    if [[ -f $override ]]; then
+        if ! cmp -s "$configuration" "$override"; then
+            printf 'Clock override changed externally; refusing to remove it: %s\n' "$override" >&2
+            return 1
+        fi
+        rm -- "$override"
+        systemctl restart systemd-timesyncd
+        printf 'CLOCK RESTORED: normal laptop time sources.\n'
+    fi
+}
+
+# %% operations
+case "$operation" in
+    start)
+        # Called after APPLY, while motion components are still stopped.
+        scp "$repository/config/robocat_clock/90-robocat-server.conf" robocat:/tmp/90-robocat-server.conf
+        ssh -t -o ConnectTimeout=5 robocat 'if ! cmp -s /tmp/90-robocat-server.conf /etc/chrony/conf.d/90-robocat-server.conf; then sudo install -m 644 /tmp/90-robocat-server.conf /etc/chrony/conf.d/90-robocat-server.conf && sudo systemctl restart chrony; fi'
+        sudo bash "$repository/scripts/robocat-clock" apply
+        ;;
+    stop)
+        if [[ -f $override ]]; then sudo bash "$repository/scripts/robocat-clock" restore; fi
+        ;;
+    apply)
+        if [[ -e /etc/systemd/timesyncd.conf.d/90-robocat-client.conf ]]; then
+            printf 'Remove the earlier permanent Robocat client override before continuing.\n' >&2
+            exit 1
+        fi
+        systemctl is-active --quiet systemd-timesyncd
+        if [[ -e $override ]]; then
+            printf 'A previous clock override remains: run bash scripts/robocat-clock stop first.\n' >&2
+            exit 1
+        fi
+        install -D -m 644 "$configuration" "$override"
+        trap 'restore' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM HUP
+        systemctl restart systemd-timesyncd
+        for ((attempt=0; attempt < 60; attempt++)); do
+            status=$(LC_ALL=C timedatectl timesync-status 2>/dev/null || true)
+            if printf '%s\n' "$status" | awk '
+                /Server:/ && /10[.]68[.]0[.]1/ {server=1}
+                /Packet count:/ {packets=$NF+0}
+                /Offset:/ {
+                    value=$NF; unit=value; sub(/^[-+0-9.]+/, "", unit)
+                    number=value+0; if (number<0) number=-number
+                    if (unit=="s") number*=1000
+                    else if (unit=="us" || unit=="µs" || unit=="μs") number/=1000
+                    else if (unit=="ns") number/=1000000
+                    else if (unit!="ms") number=1000000
+                    aligned=(number<50)
+                }
+                END {exit !(server && packets>0 && aligned)}'; then
+                trap - EXIT INT TERM HUP
+                printf 'CLOCK READY: Robocat Ethernet NTP; measured offset below 50 ms.\n'
+                exit 0
+            fi
+            sleep 1
+        done
+        printf 'CLOCK BLOCKED: no verified Robocat NTP synchronization within 60 seconds.\n%s\n' "$status" >&2
+        exit 1
+        ;;
+    restore) restore ;;
+    *) printf 'Usage: bash scripts/robocat-clock {start|stop}\n' >&2; exit 2 ;;
+esac

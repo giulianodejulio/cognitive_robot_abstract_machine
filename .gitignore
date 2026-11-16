@@ -205,3 +205,7 @@ basstler/board.json
 /deployment/artifacts/
 *.mcap
 *.db3
+
+# Private runtime connections and test output.
+/.robocat-planner/
+/tmp/

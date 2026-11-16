@@ -1,0 +1,26 @@
+# Registered through Eulero create_waypoint and verified through get_waypoint.
+# Pose captured from map -> base_footprint; no navigation goal was sent.
+# Eulero attaches waypoints to a floor, not to a particular occupancy-grid file.
+# Revalidate this pose if the map/floor alignment changes.
+name: elevator_staging
+eulero_key: labora_demo/labora_floor/elevator_staging
+parent_key: labora_demo/labora_floor
+frame_id: map
+captured_at:
+  sec: 1794330623
+  nanosec: 353669881
+is_active: true
+is_enabled: true
+pose:
+  position:
+    x: 21.69610789414912
+    y: -31.945390716277654
+    z: 0.0
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: 0.9425903957092198
+    w: -0.3339511130640779
+yaw_radians: -2.460608174041
+updated_on: '2026-11-13'
+update_reason: Shifted 0.10 m along staging positive Y to centre the entry corridor in the measured doorway.

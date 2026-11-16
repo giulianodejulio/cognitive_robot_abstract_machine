@@ -29,6 +29,10 @@ from giskardpy.motion_statechart.graph_node import (
     DebugExpression,
 )
 from giskardpy.motion_statechart.graph_node import Task, ConvergingTask
+from giskardpy.motion_statechart.trajectory_tracking import (
+    TrajectoryTrackingContext,
+    TrajectoryTrackingState,
+)
 from krrood.symbolic_math.float_variable_data import FloatVariableData
 from krrood.symbolic_math.symbolic_math import (
     VariableParameters,
@@ -38,6 +42,7 @@ from krrood.symbolic_math.symbolic_math import (
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.spatial_types import (
     Point3,
+    Vector3,
     RotationMatrix,
     HomogeneousTransformationMatrix,
 )
@@ -196,6 +201,15 @@ class CartesianPositionTrajectory(CartesianTask):
 
     goal_points: list[Point3] = field(kw_only=True)
     """Target 3D point to reach."""
+    control_heading: bool = field(default=False, kw_only=True)
+    """Also steer a planar base towards its current tracking target."""
+    heading_weight_scale: float = field(default=1.0, kw_only=True)
+    """Multiplier on the angular constraints' weight, independent of position."""
+    heading_reference_velocity: float = field(
+        default_factory=lambda: CartesianOrientation.default_reference_velocity,
+        kw_only=True,
+    )
+    """Angular constraint normalization and horizon-bound reference, in rad/s."""
     _goal_points_np: np.ndarray = field(init=False, repr=False)
     """Goal points in numpy format."""
     maximum_skip_ahead: int | None = field(default=None, kw_only=True)
@@ -277,9 +291,10 @@ class CartesianPositionTrajectory(CartesianTask):
         )
 
         # Get current tip position in root frame
-        root_P_current = context.world.compose_forward_kinematics_expression(
+        root_T_current = context.world.compose_forward_kinematics_expression(
             self.root_link, self.tip_link
-        ).position
+        )
+        root_P_current = root_T_current.position
 
         # Add constraints to move tip towards goal
         artifacts.geometry.add_point_goal_constraints(
@@ -293,9 +308,34 @@ class CartesianPositionTrajectory(CartesianTask):
             artifacts, goal=root_P_goal, current=root_P_current
         )
 
+        if self.control_heading:
+            artifacts.geometry.add_rotation_goal_constraints(
+                frame_R_current=root_T_current.rotation_matrix,
+                frame_R_goal=self._tracking_orientation(root_T_current, root_P_goal),
+                reference_velocity=self.heading_reference_velocity,
+                quadratic_weight=self.weight * self.heading_weight_scale,
+            )
+
         self.compile_current_point_on_tick(context)
         artifacts.error = self.remaining_distance
         return artifacts
+
+    def _tracking_orientation(
+        self, current_pose: HomogeneousTransformationMatrix, target_point: Point3
+    ) -> RotationMatrix:
+        """Face a planar tracking target, holding current yaw within arrival tolerance."""
+        direction = target_point - current_pose.position
+        distance = direction.norm()
+        forward = current_pose.rotation_matrix @ Vector3.X(
+            reference_frame=current_pose.reference_frame
+        )
+        direction = sm.if_less(distance, self.threshold, forward, direction)
+        direction.scale(1)
+        return RotationMatrix.from_vectors(
+            x=direction,
+            z=Vector3.Z(reference_frame=current_pose.reference_frame),
+            reference_frame=current_pose.reference_frame,
+        )
 
     def _init_remaining_distance(self, float_variable_data: FloatVariableData) -> None:
         """
@@ -381,37 +421,40 @@ class CartesianPositionTrajectory(CartesianTask):
         self, goal_reference_frame_P_tip_np: np.ndarray
     ) -> np.ndarray:
         """
-        Computes a target point at a fixed distance away from the current position projected onto the trajectory.
-        This ensures a constant velocity and pulls the tip onto the trajectory.
-        :param goal_reference_frame_P_tip_np: the current position in the goal reference frame as a 3d numpy array.
+        Advance along the remaining polyline from the current segment's projection.
+
+        The target stops at the final endpoint and skips zero-length segments.
+
+        :param goal_reference_frame_P_tip_np: Current tip position in the goal frame.
+        :return: A point on the remaining trajectory within the lookahead distance.
         """
         if self.current_index >= len(self._goal_points_np) - 1:
-            # If we've reached the end of the trajectory, return the last point
             return self._goal_points_np[-1]
-
-        p_current = self._goal_points_np[self.current_index]
-        p_next = self._goal_points_np[self.current_index + 1]
-
-        # Tangent vector
-        tangent = p_next - p_current
-        tangent_norm = np.linalg.norm(tangent)
-
-        if tangent_norm <= 1e-6:
-            # /0 safeguard
-            return p_current
-        unit_tangent = tangent / tangent_norm
-
-        # Project current position onto the segment (p_current, p_next)
-        # This is the "closest point" on the line segment
-        v = goal_reference_frame_P_tip_np - p_current
-        projection_dist = np.dot(v, unit_tangent)
-        projection_dist = np.clip(projection_dist, 0, tangent_norm)
-        p_projected = p_current + projection_dist * unit_tangent
-
-        # Aim for a point 'threshold' distance away from the PROJECTED point
-        # This ensures that the target point is always 'threshold' away along the path,
-        # which creates a vector that pulls the robot back to the path AND forward.
-        return p_projected + unit_tangent * self.look_ahead_distance
+        remaining_points = self._goal_points_np[self.current_index :]
+        segments = np.diff(remaining_points, axis=0)
+        lengths = np.linalg.norm(segments, axis=1)
+        nonzero = lengths > 0
+        if not np.any(nonzero):
+            return self._goal_points_np[-1]
+        starts = remaining_points[:-1][nonzero]
+        lengths = lengths[nonzero]
+        directions = segments[nonzero] / lengths[:, None]
+        projection = np.clip(
+            np.dot(goal_reference_frame_P_tip_np - starts[0], directions[0]),
+            0,
+            lengths[0],
+        )
+        cumulative_lengths = np.cumsum(lengths)
+        target_distance = projection + self.look_ahead_distance
+        if target_distance >= cumulative_lengths[-1]:
+            return self._goal_points_np[-1]
+        target_segment = int(np.searchsorted(cumulative_lengths, target_distance))
+        segment_start_distance = (
+            cumulative_lengths[target_segment - 1] if target_segment else 0.0
+        )
+        return starts[target_segment] + directions[target_segment] * (
+            target_distance - segment_start_distance
+        )
 
     def on_tick(
         self, context: MotionStatechartContext
@@ -433,6 +476,15 @@ class CartesianPositionTrajectory(CartesianTask):
             self.remaining_distance,
             self._distance_left_from(self.current_index, goal_reference_frame_P_tip_np),
         )
+        tracking = context.extensions.get(TrajectoryTrackingContext)
+        if tracking is not None:
+            tracking.observer.observe(
+                self,
+                context,
+                TrajectoryTrackingState(
+                    goal_reference_frame_P_tip_np.copy(), target_point.copy()
+                ),
+            )
         return None
 
     def _init_goal_reference_frame_P_current_target_point(

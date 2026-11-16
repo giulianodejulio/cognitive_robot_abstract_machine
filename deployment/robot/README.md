@@ -26,3 +26,5 @@ Per il mux, il file letto realmente dal launch è
 `/opt/pal/alum/share/robocat_bringup/config/twist_mux/twist_mux_topics.yaml`.
 Il frammento `doc/robocat_mux_snm_override.yaml` è ancora proposto: copiarlo
 in `~/.pal/config` non lo attiva. Vedere `doc/robocat_autonomous_entry.md`.
+
+Current Byobu/SNM setup supersedes the historical procedure above: see [ROBOCAT_CURRENT.md](../ROBOCAT_CURRENT.md).

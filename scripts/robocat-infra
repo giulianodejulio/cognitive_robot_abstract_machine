@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Persistent hardware/DDS/Giskard infrastructure. Run on laptop host.
+set -euo pipefail
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repository"
+command -v byobu-tmux >/dev/null
+command -v docker >/dev/null
+session=robocat-infra
+container=aicor-cram-demo
+linear=0.3
+angular=0.2
+feedback=wheel
+operation=${1:-}
+if (($#)); then shift; fi
+case "$operation" in
+    start)
+        while (($#)); do
+            case "$1" in
+                --max-linear) linear=${2:?Missing max linear}; shift 2 ;;
+                --max-angular) angular=${2:?Missing max angular}; shift 2 ;;
+                --feedback) feedback=${2:?Missing feedback source}; shift 2 ;;
+                *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+            esac
+        done
+        if [[ $feedback != wheel && $feedback != laser ]]; then
+            printf 'Feedback must be wheel or laser\n' >&2; exit 2
+        fi
+        for speed in "$linear" "$angular"; do
+            if [[ ! $speed =~ ^[0-9]+([.][0-9]+)?$ || $speed =~ ^0+([.]0+)?$ ]]; then
+                printf 'Speeds must be positive decimals\n' >&2; exit 2
+            fi
+        done
+        exec 9>"/tmp/robocat-infra.$UID.lock"
+        flock -x 9
+        if byobu-tmux has-session -t "=$session" 9>&- 2>/dev/null; then
+            printf 'Infrastructure session already exists: %s\n' "$session"
+            exit 0
+        fi
+        run_directory=$(mktemp -d /tmp/robocat-infra.XXXXXX)
+        printf '%s\n' "$feedback" > "$run_directory/feedback"
+        printf 'Infrastructure logs: %s\n' "$run_directory"
+        printf -v command '%q ' bash "$repository/scripts/robocat_byobu_window.sh" prepare "$run_directory" "$linear" "$angular" "$feedback"
+        byobu-tmux new-session -d -s "$session" -n prepare -c "$repository" "$command" 9>&-
+        for role in dds giskard; do
+            printf -v command '%q ' bash "$repository/scripts/robocat_byobu_window.sh" "$role" "$run_directory" "$linear" "$angular" "$feedback"
+            byobu-tmux new-window -t "$session:" -n "$role" -c "$repository" "$command" 9>&-
+        done
+        byobu-tmux set-option -t "$session" @robocat_run_directory "$run_directory" 9>&-
+        byobu-tmux set-option -t "$session" @robocat_infrastructure 1 9>&-
+        byobu-tmux select-window -t "$session:prepare" 9>&-
+        printf 'Attach to complete hardware preparation: byobu-tmux attach-session -t %s\n' "$session"
+        ;;
+    status)
+        if ! byobu-tmux has-session -t "=$session" 2>/dev/null; then
+            printf 'Infrastructure session: NOT RUNNING\n'
+            exit 1
+        fi
+        run_directory=$(byobu-tmux show-option -qv -t "$session" @robocat_run_directory)
+        printf 'Infrastructure session: %s\nLogs: %s\n' "$session" "$run_directory"
+        for role in prepare dds giskard; do
+            if [[ -f "$run_directory/$role.ready" && ! -f "$run_directory/$role.closed" && ! -f "$run_directory/$role.failed" ]]; then
+                printf '%s: readiness marker present\n' "$role"
+            else
+                printf '%s: NOT READY (inspect window/logs)\n' "$role"
+            fi
+        done
+        docker ps --format '{{.Names}}' | grep -Fxq robocat-dds-router && printf 'DDS container: running\n' || printf 'DDS container: not running\n'
+        docker ps --format '{{.Names}}' | grep -Fxq "$container" && printf 'CRAM container: running\n' || printf 'CRAM container: not running\n'
+        ;;
+    stop)
+        if (($#)); then printf 'Usage: bash scripts/robocat-infra stop\n' >&2; exit 2; fi
+        if ! byobu-tmux has-session -t "=$session" 2>/dev/null; then
+            printf 'No infrastructure session. Refusing to stop unowned containers.\n' >&2
+            exit 1
+        fi
+        run_directory=$(byobu-tmux show-option -qv -t "$session" @robocat_run_directory)
+        owner=$(basename "$run_directory")
+        shopt -s nullglob
+        records=("$run_directory/test_sessions"/*.active)
+        if ((${#records[@]})); then
+            printf 'Test client cleanup is not confirmed: %s\nClose/resolve the test session before stopping infrastructure.\n' "${records[0]}" >&2
+            exit 1
+        fi
+        # Refuse shutdown while any registered test session exists.
+        while IFS= read -r candidate; do
+            [[ $candidate == "$session" ]] && continue
+            if [[ $(byobu-tmux show-option -qv -t "$candidate" @robocat_test_infra 2>/dev/null || true) == "$session" ]]; then
+                printf 'Close test session %s and verify robot stopped before stopping infra.\n' "$candidate" >&2
+                exit 1
+            fi
+        done < <(byobu-tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+        printf 'STOP requires that the robot is physically stationary and NO Nav2/Giskard goal is active.\n'
+        read -r -p 'Confirm physical stop and accessible E-stop. Type STOP: ' confirmation
+        if [[ $confirmation != STOP ]]; then printf 'Aborted; infrastructure kept running.\n'; exit 1; fi
+        printf 'Stopping owned Giskard process...\n'
+        docker exec -w /workspace/cram "$container" bash scripts/robocat_stop_owned_process.sh "/tmp/$owner.giskard.pid" "$owner"
+        printf 'Stopping owned DDS router...\n'
+        if docker inspect robocat-dds-router >/dev/null 2>&1; then
+            label=$(docker inspect robocat-dds-router --format '{{index .Config.Labels "org.robocat.infra.owner"}}')
+            if [[ $label != "$owner" ]]; then
+                printf 'DDS router owner mismatch (got %s, expected %s). Refusing to stop it.\n' "$label" "$owner" >&2
+                exit 1
+            fi
+            docker stop --time 10 robocat-dds-router
+        fi
+        bash scripts/robocat-clock stop
+        printf 'Closing persistent Byobu session...\n'
+        byobu-tmux kill-session -t "=$session"
+        printf 'Infrastructure stopped. CRAM Docker container was left running.\n'
+        ;;
+    *)
+        printf 'Usage: bash scripts/robocat-infra {start [--max-linear M/S --max-angular RAD/S --feedback wheel|laser]|status|stop}\n' >&2
+        exit 2 ;;
+esac

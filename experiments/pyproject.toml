@@ -28,6 +28,8 @@ version = {attr = "experiments._version.__version__"}
 
 [tool.setuptools.package-data]
 "experiments.tiago_monitor" = ["*.js"]
+"experiments.robocat_waypoints" = ["*.sh"]
+"experiments.robocat_snm" = ["*.sh"]
 
 [dependency-groups]
 workspace = [

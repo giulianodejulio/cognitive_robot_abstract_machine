@@ -1,3 +1,5 @@
+> **Setup Robocat attuale (16 novembre 2026):** [deployment/ROBOCAT_CURRENT.md](deployment/ROBOCAT_CURRENT.md). Le sezioni successive descrivono il salvataggio storico del 6 novembre.
+
 # CRAM/Giskard su TIAGo e Robocat reali
 
 Questa branch conserva le modifiche locali degli esperimenti sul robot reale

@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# %% explicit host recovery
+set -euo pipefail
+if [[ ${1:-} == --help ]]; then
+    printf 'Usage on laptop host: bash scripts/robocat-recover-motors\nGuided physical rearm, verified driver recovery and infrastructure restoration. No motion goals.\n'
+    exit 0
+fi
+if (($#)); then printf 'Unexpected arguments; use --help\n' >&2; exit 2; fi
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$repository"
+container=aicor-cram-demo
+session=robocat-infra
+exec 9>"/tmp/robocat-motor-recovery.$UID.lock"
+flock -n 9 || { printf 'Another motor recovery is running\n' >&2; exit 1; }
+run_directory=$(byobu-tmux show-option -qv -t "$session" @robocat_run_directory)
+if [[ ! -d $run_directory || ! -f $run_directory/prepare.ready || ! -f $run_directory/dds.ready ]]; then
+    printf 'Prepared robocat-infra with DDS is required\n' >&2; exit 1
+fi
+owner=$(basename "$run_directory")
+log_directory=$(mktemp -d /tmp/robocat-motor-recovery.XXXXXX)
+exec > >(tee -a "$log_directory/recovery.log") 2>&1
+printf 'Recovery log: %s\n' "$log_directory/recovery.log"
+success=false
+suspended=false
+restarted=false
+guard_input=
+finish() {
+    local result=$?
+    trap - EXIT
+    if [[ -n $guard_input ]]; then exec {guard_input}>&-; wait "$guard_process" || true; fi
+    if [[ $success != true ]]; then
+        printf 'RECOVERY INCOMPLETE. No movement goal sent. Inspect %s/recovery.log\n' "$log_directory"
+        if [[ $suspended == true ]]; then printf 'Giskard may remain stopped; do not restart navigation before checking the failed step.\n'; fi
+    fi
+    exit "$result"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+printf 'Confirm robot physically stopped, NO active navigation goal, teleop OFF, charger disconnected, area free and emergency stop reachable.\n'
+read -r -p 'Type STOPPED to authorize recovery: ' confirmation
+[[ $confirmation == STOPPED ]] || { printf 'Canceled\n'; exit 1; }
+bash scripts/connect_robocat_planner.sh
+socket="$repository/.robocat-planner/ssh.sock"
+# Hold the same container lock as robocat-entry throughout physical intervention.
+coproc entry_guard { docker exec -i "$container" flock -n /tmp/robocat-entry.lock bash -c 'printf "RECOVERY_LOCKED\n"; cat >/dev/null'; }
+guard_process=$entry_guard_PID
+guard_input=${entry_guard[1]}
+read -r -t 10 -u "${entry_guard[0]}" acknowledgment
+[[ $acknowledgment == RECOVERY_LOCKED ]] || { printf 'An SNM request is active; cancel it first\n'; exit 1; }
+remote_check() {
+    local command
+    printf -v command '%q ' bash -c "$(cat experiments/src/experiments/robocat_snm/recovery_remote.sh)" bash "$@"
+    tar -cf - -C "$repository/experiments/src" \
+        experiments/__init__.py experiments/_version.py experiments/robocat_snm/__init__.py \
+        experiments/robocat_snm/native_navigation.py experiments/robocat_snm/native_preparation.py \
+        experiments/robocat_snm/motor_recovery.py |
+        ssh -S "$socket" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ControlMaster=no \
+            -o ConnectTimeout=3 robocat "$command" \
+            2> >(sed -u -f "$repository/experiments/src/experiments/robocat_snm/preparation_log.sed" >&2) |
+        sed -u -f "$repository/experiments/src/experiments/robocat_snm/preparation_log.sed"
+}
+remote_pal() {
+    local command
+    printf -v command '%q ' bash -c 'set -e; source /opt/ros/humble/setup.bash; source /opt/pal/alum/setup.bash; export ROS_DOMAIN_ID=102 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; exec pal module "$@"' bash "$@"
+    ssh -S "$socket" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ControlMaster=no \
+        -o ConnectTimeout=3 robocat "$command" \
+        2> >(sed -u -f "$repository/experiments/src/experiments/robocat_snm/preparation_log.sed" >&2) |
+        sed -u -f "$repository/experiments/src/experiments/robocat_snm/preparation_log.sed"
+}
+
+# %% preserve settings and suspend the owned server
+remote_check stopped
+settings=$(remote_check settings | tee "$log_directory/settings.log" | sed -n 's/^NAV2_SETTINGS: //p')
+read -r position orientation extra <<< "$settings"
+[[ -n $position && -n $orientation && -z ${extra:-} ]] || { printf 'Cannot preserve Nav2 settings\n'; exit 1; }
+arguments=$(docker exec "$container" bash -c '
+    set -e; pidfile=$1; owner=$2
+    read -r process < "$pidfile"
+    [[ $process =~ ^[0-9]+$ && $process -gt 1 ]]
+    grep -zFxq "ROBOCAT_BYOBU_OWNER=$owner" "/proc/$process/environ"
+    tr "\0" "\n" < "/proc/$process/cmdline"
+' bash "/tmp/$owner.giskard.pid" "$owner")
+linear=
+angular=
+previous=
+while IFS= read -r argument; do
+    if [[ $previous == --max-linear ]]; then linear=$argument; fi
+    if [[ $previous == --max-angular ]]; then angular=$argument; fi
+    previous=$argument
+done <<< "$arguments"
+for speed in "$linear" "$angular"; do
+    [[ $speed =~ ^[0-9]+([.][0-9]+)?$ && ! $speed =~ ^0+([.]0+)?$ ]] || { printf 'Cannot preserve Giskard velocity limits\n'; exit 1; }
+done
+printf 'Preserved Nav2 tolerances: %s m / %s rad; Giskard limits: %s m/s / %s rad/s\n' "$position" "$orientation" "$linear" "$angular"
+rm -f -- "$run_directory/giskard.closed" "$run_directory/giskard.failed"
+docker exec -w /workspace/cram "$container" bash scripts/robocat_stop_owned_process.sh "/tmp/$owner.giskard.pid" "$owner"
+suspended=true
+# Wait for the old infrastructure window to finish its own cleanup before respawn.
+deadline=$((SECONDS + 10))
+while [[ ! -f $run_directory/giskard.closed ]]; do
+    ((SECONDS < deadline)) || { printf 'Giskard window cleanup not confirmed\n'; exit 1; }
+    sleep .2
+done
+
+# %% operator-controlled physical rearm
+printf '\nPress the physical emergency mushroom and leave it pressed.\n'
+read -r -p 'Type PRESSED when done: ' confirmation
+[[ $confirmation == PRESSED ]] || exit 1
+remote_check pressed
+printf '\nRelease the mushroom, press and release physical Start/On-Off for about one second. Wait for a steady green light.\n'
+read -r -p 'Type OK when the light is steady green: ' confirmation
+[[ $confirmation == OK ]] || exit 1
+remote_check rearmed
+if remote_check drivers; then
+    printf 'Physical rearm recovered both wheel drivers; no PAL restart needed.\n'
+else
+    printf 'Drivers still unavailable/faulted. Restarting controller_manager once.\n'
+    remote_check rearmed
+    remote_pal restart controller_manager
+    restarted=true
+    remote_check drivers
+    remote_pal start emergency_stop_controller default_controllers
+fi
+
+# %% verified configuration and server restoration
+bash scripts/prepare_robocat_controller.sh --apply --confirm-navigation-idle
+remote_check restore --position "$position" --orientation "$orientation"
+remote_check stopped
+remote_check drivers
+if [[ -f $run_directory/giskard.log ]]; then
+    cp -- "$run_directory/giskard.log" "$log_directory/giskard-before-restart.log"
+fi
+: > "$run_directory/giskard.log"
+rm -f -- "$run_directory/giskard.ready" "$run_directory/giskard.closed" "$run_directory/giskard.failed"
+printf -v launch '%q ' bash "$repository/scripts/robocat_byobu_window.sh" giskard "$run_directory" "$linear" "$angular"
+byobu-tmux respawn-pane -k -t "$session:giskard.0" "$launch"
+deadline=$((SECONDS + 120))
+while [[ ! -f $run_directory/giskard.ready ]]; do
+    [[ ! -f $run_directory/giskard.failed && ! -f $run_directory/giskard.closed ]] || { printf 'Giskard restart failed\n'; exit 1; }
+    ((SECONDS < deadline)) || { printf 'Giskard readiness timed out\n'; exit 1; }
+    sleep .2
+done
+success=true
+printf '\nRECOVERY OK: both wheel drivers operational; base controller calibrated and active; Giskard ready. No motion goal sent.\n'
+if [[ $restarted == true ]]; then
+    printf 'Controller restarted: check scan/map alignment and robot pose in RViz before navigation. Use 2D Pose Estimate only if needed.\n'
+else
+    printf 'Check robot pose and scan/map alignment in RViz before navigation.\n'
+fi

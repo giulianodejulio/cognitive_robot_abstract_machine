@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
 
 from rclpy.qos import QoSProfile, LivelinessPolicy, ReliabilityPolicy, DurabilityPolicy
 from krrood.ormatic.utils import classproperty
@@ -20,6 +22,11 @@ from semantic_digital_twin.adapters.ros.input_synchronization import (
     SubscribedBasePoseSource,
 )
 from semantic_digital_twin.adapters.ros.lidar import SubscribedLidarSource
+from semantic_digital_twin.adapters.ros.ros2_to_semdt_converters import (
+    LaserScanToSemDTConverter,
+)
+from semantic_digital_twin.adapters.sensors.lidar import Lidar
+from semantic_digital_twin.datastructures.lidar_reading import LidarReading
 from semantic_digital_twin.robots.robocat import Robocat
 from semantic_digital_twin.robots.robot_parts import AbstractRobot
 from semantic_digital_twin.world_description.connections import DifferentialDrive
@@ -51,6 +58,18 @@ class RobocatOdometrySource(SubscribedBasePoseSource):
     Read odometry from the bridge's best-effort sensor stream.
     """
 
+    applied_message: Odometry | None = field(default=None, init=False, repr=False)
+    """
+    Last odometry sample successfully written into the controller world.
+    """
+
+    def apply_message(self, message: Odometry) -> None:
+        """
+        Retain the sample underlying the measured model pose for diagnostics.
+        """
+        super().apply_message(message)
+        self.applied_message = message
+
     @classproperty
     def qos_profile(cls) -> QoSProfile:
         return RobocatSensorPolicy.qos_profile
@@ -76,6 +95,16 @@ class RobocatLidarSource(SubscribedLidarSource):
     @classproperty
     def qos_profile(cls) -> QoSProfile:
         return RobocatSensorPolicy.qos_profile
+
+    def get_lidar_reading(
+        self, lidar: Lidar, scan: LaserScan | None = None
+    ) -> LidarReading:
+        """
+        Convert a captured scan or the latest available sensor message.
+        """
+        return LaserScanToSemDTConverter.convert(
+            self.received_scan if scan is None else scan, lidar.root._world
+        )
 
 
 # %% bounded real feedback
@@ -131,6 +160,12 @@ class RobocatBaseInterface(RobotInterfaceConfig):
     """
 
     def setup(self) -> None:
+        node = rospy.get_node()
+        command_topic = node.resolve_topic_name("/cmd_vel")
+        node.declare_parameter(
+            "base_feedback_topic", node.resolve_topic_name(RobocatTopic.ODOMETRY)
+        )
+        node.declare_parameter("base_command_topic", command_topic)
         drive = self.world.get_connections_by_type(DifferentialDrive)[0]
         self.velocity_limits.apply_to(drive)
         if self.server_config.is_standalone:
@@ -146,7 +181,12 @@ class RobocatBaseInterface(RobotInterfaceConfig):
             joints=RobocatJointStateSource(
                 world=self.world, node=rospy.get_node(), topic_name=RobocatTopic.JOINTS
             ),
-            interlocks=RobocatFeedback(rospy.get_node()),
+            interlocks=RobocatFeedback(
+                node,
+                active_priorities=(
+                    ("0", "20") if command_topic == "/snm_vel" else ("0", "10")
+                ),
+            ),
         )
         for source in (feedback.odometry, feedback.joints):
             self.motion_server.inputs.add_input(source)
