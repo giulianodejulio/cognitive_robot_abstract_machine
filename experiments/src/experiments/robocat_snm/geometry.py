@@ -25,28 +25,72 @@ class EntryAssessment:
     rear_clearance: float
     """Signed rear displacement beyond the threshold plus required margin, in metres."""
     position_tolerance: float
-    """Maximum accepted planar target error in metres."""
+    """Maximum accepted longitudinal error, or planar error without axis evidence."""
     orientation_tolerance: float
     """Maximum accepted absolute target heading error in radians."""
 
+    longitudinal_error: float | None = None
+    """Signed displacement along the target heading, when available."""
+    lateral_error: float = 0.0
+    """Signed displacement across the target heading."""
+    lateral_tolerance: float = 0.05
+    """Maximum accepted lateral displacement in metres."""
+    lateral_clearance: float = math.inf
+    """Remaining chassis clearance within the checked corridor."""
+
+    wall_distance: float | None = None
+    """Measured base-to-cabin-wall distance when lidar completion is selected."""
+    wall_reference: float | None = None
+    """Calibrated wall distance at the physically validated internal pose."""
+    wall_tolerance: float = 0.05
+    """Acceptance around the validated internal wall reference."""
+
     @property
     def fully_inside(self) -> bool:
-        """Require positive rear clearance beyond the configured safety margin."""
-        return self.rear_clearance > 0
+        """Require containment under the selected odometric or calibrated wall reference."""
+        if self.wall_reference is not None:
+            return (
+                self.target_reached
+                and self.lateral_clearance > 0
+                and abs(self.yaw_error) <= math.radians(15)
+            )
+        return self.rear_clearance > 0 and self.lateral_clearance > 0
 
     @property
     def target_reached(self) -> bool:
         """Require position and heading to satisfy their independent bounds."""
+        if self.wall_reference is not None:
+            return (
+                self.wall_distance is not None
+                and math.isfinite(self.wall_distance)
+                and abs(self.wall_distance - self.wall_reference) <= self.wall_tolerance
+            )
         return (
-            self.position_error <= self.position_tolerance
+            (
+                self.position_error
+                if self.longitudinal_error is None
+                else abs(self.longitudinal_error)
+            )
+            <= self.position_tolerance
+            and abs(self.lateral_error) <= self.lateral_tolerance
             and abs(self.yaw_error) <= self.orientation_tolerance
         )
 
     def describe(self) -> str:
         """Explain final acceptance using measured residuals and their bounds."""
+        if self.wall_reference is not None:
+            return (
+                f"WALL FINAL: distance={self.wall_distance} m; reference={self.wall_reference:.4f} m; "
+                f"tolerance={self.wall_tolerance:.4f} m; lateral_clearance={self.lateral_clearance:.4f} m; "
+                f"yaw_error={math.degrees(self.yaw_error):.3f} deg; "
+                f"within_validated_inside_reference={self.fully_inside}; target_reached={self.target_reached}"
+            )
         return (
             f"ENTRY FINAL: position_error={self.position_error:.4f} m "
+            f"(total distance); longitudinal_error={self.longitudinal_error} m "
             f"(limit={self.position_tolerance:.4f} m); "
+            f"lateral_error={self.lateral_error:.4f} m (limit={self.lateral_tolerance:.4f} m); "
+            f"lateral_clearance={self.lateral_clearance:.4f} m; "
             f"yaw_error={math.degrees(self.yaw_error):.3f} deg "
             f"(limit={math.degrees(self.orientation_tolerance):.3f} deg); "
             f"rear_clearance_beyond_required={self.rear_clearance:.4f} m "
@@ -118,7 +162,7 @@ class EntryGeometry:
     margin: float = 0.1
     """Longitudinal clearance beyond the threshold and target chassis."""
     position_tolerance: float = 0.02
-    """Completion position tolerance in metres."""
+    """Completion longitudinal tolerance in metres."""
     orientation_tolerance: float = math.radians(5)
     """Completion heading tolerance in radians."""
     staging_tolerance: float = StagingAlignment.position_tolerance
@@ -127,6 +171,16 @@ class EntryGeometry:
     """Maximum separation of checked transverse corridor sections, in metres."""
     staging_orientation_tolerance: float = StagingAlignment.orientation_tolerance
     """Maximum staging heading error before entry, independently of final heading accuracy."""
+
+    lateral_tolerance: float = 0.05
+    """Final lateral acceptance inside the checked corridor, in metres."""
+    chassis_half_width: float = 0.2002
+    """Robocat chassis half width from the robot footprint, in metres."""
+
+    target_lateral: float = 0.0
+    """Target displacement along staging Y, in metres."""
+    target_yaw: float = 0.0
+    """Target heading relative to staging, in radians."""
 
     def validate(self) -> None:
         """Reject nonfinite geometry and targets leaving the chassis on the threshold."""
@@ -145,6 +199,8 @@ class EntryGeometry:
             self.staging_tolerance,
             self.staging_orientation_tolerance,
             self.section_spacing,
+            self.lateral_tolerance,
+            self.chassis_half_width,
         )
         if not all(math.isfinite(value) for value in values) or any(
             value <= 0 for value in values[3:]
@@ -154,6 +210,16 @@ class EntryGeometry:
             raise EntryError(
                 "The configured target does not place the complete chassis inside"
             )
+        if not math.isfinite(self.target_lateral) or not math.isfinite(self.target_yaw):
+            raise EntryError("Inside waypoint must have finite planar coordinates")
+        if abs(self.target_yaw) > self.orientation_tolerance:
+            raise EntryError(
+                "Inside waypoint heading is incompatible with straight entry; align staging and inside"
+            )
+        if not self.assess(self.target).fully_inside:
+            raise EntryError(
+                "Inside waypoint does not fit the checked corridor beyond the doorway"
+            )
         if self.distance > 2.0 or self.half_width < 0.25:
             raise EntryError(
                 "Initial trial supports entry distances up to 2 m and corridor widths of at least 0.5 m"
@@ -161,10 +227,12 @@ class EntryGeometry:
 
     @property
     def target(self) -> Pose:
-        """Target pose in map coordinates with staging heading retained."""
+        """Configured target pose expressed in map coordinates."""
         map_T_target = (
             self.staging.homogeneous_matrix
-            @ Pose.from_xyz_rpy(x=self.distance).homogeneous_matrix
+            @ Pose.from_xyz_rpy(
+                x=self.distance, y=self.target_lateral, yaw=self.target_yaw
+            ).homogeneous_matrix
         )
         return Pose(position=map_T_target.position, orientation=map_T_target.quaternion)
 
@@ -196,12 +264,20 @@ class EntryGeometry:
             - self.rear_extent * abs(math.cos(yaw))
             - self.half_width * abs(math.sin(yaw))
         )
+        residual = StagingAlignment(self.target).measure(pose)
         return EntryAssessment(
-            position_error=math.hypot(float(local.x) - self.distance, float(local.y)),
-            yaw_error=yaw,
+            position_error=residual.distance,
+            yaw_error=residual.yaw,
             rear_clearance=rear - (self.doorway_distance + self.margin),
             position_tolerance=self.position_tolerance,
             orientation_tolerance=self.orientation_tolerance,
+            longitudinal_error=residual.longitudinal,
+            lateral_error=residual.lateral,
+            lateral_tolerance=self.lateral_tolerance,
+            lateral_clearance=self.half_width
+            - abs(float(local.y))
+            - self.chassis_half_width * abs(math.cos(yaw))
+            - max(self.front_extent, self.rear_extent) * abs(math.sin(yaw)),
         )
 
     def reached(self, pose: Pose) -> bool:

@@ -653,7 +653,7 @@ class CartesianOrientation(CartesianTask):
         Build motion constraints for reaching the goal orientation.
 
         :param context: Provides access to world model and kinematic expressions.
-        :return: The artifacts of this task, whose error is the angle between the tip orientation and the goal orientation.
+        :return: The task artifacts, with the shortest orientation error in [0, pi] radians.
         """
         artifacts = NodeArtifacts()
         root_R_goal = self.root_T_goal_reference_frame @ self.goal_orientation
@@ -676,7 +676,9 @@ class CartesianOrientation(CartesianTask):
             artifacts, goal=root_R_goal, current=root_R_current
         )
 
-        artifacts.error = sm.abs(root_R_current.rotational_distance(root_R_goal))
+        artifacts.error = root_R_current.quaternion.rotational_distance(
+            root_R_goal.quaternion
+        )
         return artifacts
 
 

@@ -1,0 +1,19 @@
+name: elevator_inside
+eulero_key: labora_demo/labora_floor/elevator_inside
+parent_key: labora_demo/labora_floor
+frame_id: map
+map_fingerprint: 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda
+pose:
+  position:
+    x: 20.636489511377455
+    y: -32.73452962093318
+    z: 0.0
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: -0.9413145357468479
+    w: 0.33753065755823775
+yaw_radians: -2.4530079175167847
+exported_on: '2026-11-18'
+source: Read-only native Eulero get_waypoint, transformed into the current map; not
+  a new acquisition of the tape reference

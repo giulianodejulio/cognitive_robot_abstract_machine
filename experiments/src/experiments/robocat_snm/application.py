@@ -10,7 +10,7 @@ import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from enum import StrEnum
 from types import FrameType
@@ -30,12 +30,24 @@ from experiments.robocat_safety import RobocatEnvironment, FeedbackSource
 from experiments.robocat_snm.exceptions import EntryError
 from experiments.robocat_snm.door_passage import CalibratedDoorPassage
 from experiments.robocat_snm.feedback import EntryInputs
+from experiments.robocat_snm.verbose import TraceLogger
+from experiments.robocat_snm.profiles import EntryProfile, EntryProfileName
+from experiments.robocat_snm.cabin_turn import (
+    CabinTurnAuthorization,
+    CabinTurnMeasurement,
+    RobocatCabinTurnMotion,
+)
+from experiments.tiago_goal_logging import PlanarPose
 from experiments.robocat_snm.geometry import EntryGeometry, StagingAlignment
 from experiments.robocat_snm.native_navigation import NavigationStatus
 from experiments.robocat_snm.navigation import NavigationConnection
+from experiments.robocat_snm.waypoint import WaypointConnection
+from experiments.robocat_wall import WallStopSettings
 from experiments.robocat_snm.policy import EntryPhase, EntryPolicy
 from giskardpy.middleware.ros2 import rospy
-from scripts.robocat_giskard_goal import RobocatStraightMotion
+from experiments.robocat_snm.entry_motion import (
+    RobocatEntryMotion as RobocatStraightMotion,
+)
 from scripts.tiago_giskard_goal import GoalCancellation, MotionTolerances
 from semantic_digital_twin.adapters.ros.world_fetcher import fetch_world_from_service
 from semantic_digital_twin.adapters.ros.world_synchronizer import WorldSynchronizer
@@ -48,16 +60,30 @@ from semantic_digital_twin.spatial_types import Pose
 class EntryOptions:
     """Explicit calibration and execution choices for one supervised trial."""
 
+    profile: EntryProfileName | None = None
+    """Named calibration whose values are defaults for explicit CLI overrides."""
     staging: Path = Path("doc/robocat_elevator_staging.yaml")
     """Saved staging pose whose map alignment the operator has checked."""
     doorway_distance: float | None = None
     """Measured threshold distance along the staging waypoint's forward axis."""
     distance: float = 1.5
     """Inside target distance from staging, in metres."""
+    inside_waypoint: str | None = None
+    """Eulero cabin waypoint name or full key, replacing a distance-only target."""
+    position_tolerance: float = EntryGeometry.position_tolerance
+    """Final longitudinal acceptance in metres."""
+    orientation_tolerance_deg: float = math.degrees(EntryGeometry.orientation_tolerance)
+    """Final target heading acceptance in degrees."""
+    wall_stop_distance: float | None = None
+    """Explicit calibrated base-to-cabin-wall stopping distance in metres."""
     feedback: FeedbackSource = FeedbackSource.WHEEL
     """Odometry used consistently for motion targets and entry geometry."""
     map_fingerprint: str | None = None
     """Expected active-map identity printed by the non-executing check."""
+    turn_after_entry: bool = False
+    """Opt in to a doorway-facing pure turn only after certified lidar arrival."""
+    verbose: bool = False
+    """Enable periodic timing and geometry evidence without changing entry decisions."""
     execute: bool = False
     """Explicit authorization to submit movement goals."""
     confirm_navigation_idle: bool = False
@@ -98,16 +124,50 @@ class EntryOptions:
         """Validate execution opt-in before creating action clients."""
         defaults = cls()
         parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument(
+            "--profile",
+            type=EntryProfileName,
+            choices=list(EntryProfileName),
+            help="Load stable elevator calibration; explicit CLI options override it",
+        )
         parser.add_argument("--staging", type=Path, default=defaults.staging)
         parser.add_argument("--doorway-distance", type=float)
-        parser.add_argument("--distance", type=float, default=defaults.distance)
+        target = parser.add_mutually_exclusive_group()
+        target.add_argument("--distance", type=float, default=argparse.SUPPRESS)
+        target.add_argument(
+            "--inside-waypoint",
+            help="Saved Eulero cabin waypoint name or full floor key",
+        )
+        parser.add_argument(
+            "--position-tolerance", type=float, default=defaults.position_tolerance
+        )
+        parser.add_argument(
+            "--orientation-tolerance-deg",
+            type=float,
+            default=defaults.orientation_tolerance_deg,
+        )
         parser.add_argument(
             "--feedback",
             type=FeedbackSource,
             choices=list(FeedbackSource),
             default=defaults.feedback,
         )
+        parser.add_argument(
+            "--wall-stop-distance",
+            type=float,
+            help="Calibrated base-to-back-wall distance; wheel feedback only",
+        )
         parser.add_argument("--map-fingerprint")
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Print detailed timing, wall and passage diagnostics",
+        )
+        parser.add_argument(
+            "--turn-after-entry",
+            action="store_true",
+            help="Turn toward the doorway after successful lidar-referenced entry and measured rest",
+        )
         parser.add_argument("--execute", action="store_true")
         parser.add_argument("--confirm-navigation-idle", action="store_true")
         parser.add_argument(
@@ -165,7 +225,21 @@ class EntryOptions:
         parser.add_argument(
             "--navigation-timeout", type=float, default=defaults.navigation_timeout
         )
+        selection = parser.parse_args(arguments)
+        if selection.profile is not None:
+            calibration = asdict(EntryProfile.load(selection.profile))
+            if "distance" in vars(selection):
+                calibration["inside_waypoint"] = None
+            if selection.pass_door_action:
+                calibration["retain_door_clearance"] = False
+            parser.set_defaults(**calibration)
         options = cls(**vars(parser.parse_args(arguments)))
+        if options.turn_after_entry and (
+            options.wall_stop_distance is None or options.handover_only
+        ):
+            parser.error(
+                "--turn-after-entry requires lidar wall stopping and a complete entry request"
+            )
         handover_tolerances = (
             options.handover_position_tolerance,
             options.handover_orientation_tolerance_deg,
@@ -180,9 +254,28 @@ class EntryOptions:
             for value in handover_tolerances
         ):
             parser.error("Handover tolerances must be positive and finite")
+        if options.wall_stop_distance is not None:
+            if (
+                not math.isfinite(options.wall_stop_distance)
+                or options.wall_stop_distance
+                <= EntryGeometry.front_extent
+                + EntryGeometry.margin
+                + options.position_tolerance
+            ):
+                parser.error(
+                    "Wall stop reference must leave measured front clearance, including tolerance"
+                )
+            if options.feedback is not FeedbackSource.WHEEL or options.pass_door_action:
+                parser.error(
+                    "--wall-stop-distance requires wheel feedback and the baseline entry motion"
+                )
         if options.confirm_navigation_idle and options.execute:
             parser.error(
                 "--confirm-navigation-idle is only allowed for read-only checks"
+            )
+        if options.inside_waypoint is not None and options.pass_door_action:
+            parser.error(
+                "--inside-waypoint currently supports the baseline entry, not --pass-door-action"
             )
         if options.entry_only and options.handover_only:
             parser.error("--entry-only and --handover-only are mutually exclusive")
@@ -206,6 +299,8 @@ class EntryOptions:
             )
         values = (
             options.distance,
+            options.position_tolerance,
+            options.orientation_tolerance_deg,
             options.staging_position_tolerance,
             options.staging_orientation_tolerance_deg,
             options.wait_timeout,
@@ -224,12 +319,21 @@ class EntryOptions:
                 f"received {feedback_topic} and {command_topic}"
             )
 
-    def entry_geometry(self, staging: Pose, doorway_distance: float) -> EntryGeometry:
+    def entry_geometry(
+        self, staging: Pose, doorway_distance: float, inside: Pose | None = None
+    ) -> EntryGeometry:
         """Construct entry geometry with staging acceptance independent of goal completion."""
+        if self.inside_waypoint is not None and inside is None:
+            raise EntryError("The requested inside waypoint has not been resolved")
+        residual = None if inside is None else StagingAlignment(staging).measure(inside)
         return EntryGeometry(
             staging,
             doorway_distance,
-            self.distance,
+            self.distance if residual is None else residual.longitudinal,
+            target_lateral=0.0 if residual is None else residual.lateral,
+            target_yaw=0.0 if residual is None else residual.yaw,
+            position_tolerance=self.position_tolerance,
+            orientation_tolerance=math.radians(self.orientation_tolerance_deg),
             staging_tolerance=self.staging_position_tolerance,
             staging_orientation_tolerance=math.radians(
                 self.staging_orientation_tolerance_deg
@@ -362,6 +466,9 @@ class EntryMission:
     cancellation: GoalCancellation | None = field(default=None, init=False)
     """Idempotent cancellation of the accepted Giskard goal."""
 
+    trace_logger: TraceLogger = field(default_factory=TraceLogger, init=False)
+    """Rate-limited detailed observation output, enabled only by the CLI flag."""
+
     def approach(self) -> None:
         """Require native success, free mux and measured rest before handover."""
         if self.stop.requested:
@@ -452,7 +559,26 @@ class EntryMission:
         self.policy.retain_door_clearance = self.options.retain_door_clearance
         if self.options.retain_door_clearance:
             self.events.report(
-                "ENTRY MODE: baseline motion; doorway opening retained after stable authorization"
+                "ENTRY MODE: Cartesian straight motion; doorway opening retained after stable authorization"
+            )
+        if self.options.wall_stop_distance is not None:
+            self.events.report(
+                f"COMPLETION: lidar distance within {geometry.position_tolerance:g} m of reference; measured wheel rest; lateral and yaw safety bounds retained (yaw <= 15 deg)"
+            )
+        elif not self.options.pass_door_action:
+            self.events.report(
+                f"COMPLETION: longitudinal tolerance={geometry.position_tolerance:g} m; "
+                f"lateral tolerance={geometry.lateral_tolerance:g} m; "
+                f"orientation tolerance={math.degrees(geometry.orientation_tolerance):g} deg; "
+                "fresh measured wheel settling"
+            )
+        if self.options.wall_stop_distance is not None:
+            self.events.report(
+                f"LIDAR STOP: base-to-wall reference={self.options.wall_stop_distance:.4f} m; tolerance={geometry.position_tolerance:.4f} m; wheel tracking; nominal target adaptation bounded to 0.40 m"
+            )
+        if self.options.inside_waypoint is not None:
+            self.events.report(
+                f"INSIDE WAYPOINT: {self.options.inside_waypoint}; map target=({float(geometry.target.x):.4f}, {float(geometry.target.y):.4f}); yaw={math.degrees(float(geometry.target.yaw)):.3f} deg; staging-relative=({geometry.distance:.4f}, {geometry.target_lateral:.4f}) m"
             )
         self.approach()
         self.inputs.freeze(geometry, self.options.map_fingerprint)
@@ -501,6 +627,18 @@ class EntryMission:
                     problem=bool(self.inputs.last_reasons)
                     or self.policy.phase in (EntryPhase.STOPPING, EntryPhase.FAILED),
                 )
+                if self.options.verbose:
+                    self.trace_logger.emit(
+                        self.inputs.trace,
+                        now,
+                        problem=f"{self.policy.phase}: {self.policy.reason}: {self.inputs.last_reasons}",
+                        force=self.policy.phase
+                        in (
+                            EntryPhase.SUCCEEDED,
+                            EntryPhase.FAILED,
+                            EntryPhase.CANCELED,
+                        ),
+                    )
                 if self.policy.phase is EntryPhase.ENTERING and self.motion is None:
                     if (
                         not self.inputs.feedback.ready()
@@ -518,6 +656,15 @@ class EntryMission:
                         if self.options.pass_door_action
                         else RobocatStraightMotion(
                             target,
+                            lateral_tolerance=geometry.lateral_tolerance,
+                            wall_stop=(
+                                None
+                                if self.options.wall_stop_distance is None
+                                else WallStopSettings(
+                                    self.options.wall_stop_distance,
+                                    tolerance=geometry.position_tolerance,
+                                )
+                            ),
                             tolerances=MotionTolerances(
                                 geometry.position_tolerance,
                                 math.degrees(geometry.orientation_tolerance),
@@ -531,7 +678,7 @@ class EntryMission:
                     )
                     motion_deadline = now + self.options.motion_timeout
                     self.events.report(
-                        f"GISKARD: submitting {'PassDoorAction (native staging correction, latched doorway)' if self.options.pass_door_action else 'fixed inside target'}; distance_from_staging={geometry.distance:g} m"
+                        f"GISKARD: submitting {'PassDoorAction (native staging correction, latched doorway)' if self.options.pass_door_action else ('lidar-updated longitudinal target' if self.options.wall_stop_distance is not None else 'fixed inside target')}; nominal_distance_from_staging={geometry.distance:g} m"
                     )
                 if self.policy.phase is EntryPhase.STOPPING:
                     if stopping_deadline == math.inf:
@@ -561,8 +708,161 @@ class EntryMission:
                         self.events.report(
                             f"GISKARD ERROR: {self.motion.exception()!r}", problem=True
                         )
+                    if (
+                        self.policy.phase is EntryPhase.SUCCEEDED
+                        and self.options.turn_after_entry
+                    ):
+                        return self.turn_inside()
                     return self.policy.phase
                 time.sleep(0.1)
+
+    def turn_inside(self) -> EntryPhase:
+        """Authorize a separate pure turn from fresh longitudinal acceptance and monitor its arrest."""
+        current = self.navigation.poll()
+        observation = self.inputs.observe(
+            current and self.navigation.idle and self.navigation.routing_ready
+        )
+        authorization = CabinTurnAuthorization(
+            self.policy.phase is EntryPhase.SUCCEEDED
+            and self.motion is not None
+            and self.motion.done()
+            and self.motion.exception() is None,
+            observation,
+            self.inputs.last_assessment,
+        )
+        if (
+            self.stop.requested
+            or not authorization.allowed
+            or self.options.wall_stop_distance is None
+            or self.inputs.last_assessment.wall_reference
+            != self.options.wall_stop_distance
+            or not self.inputs.feedback.ready()
+        ):
+            self.events.report(
+                "TURN BLOCKED: fresh longitudinal arrival, measured rest or entry success not certified; no turn goal sent",
+                problem=True,
+            )
+            return EntryPhase.CANCELED if self.stop.requested else EntryPhase.FAILED
+        wheel = self.inputs.pose_feedback
+        if wheel is None:
+            self.events.report(
+                "TURN BLOCKED: wheel pose unavailable; no turn goal sent", problem=True
+            )
+            return EntryPhase.FAILED
+        start = PlanarPose.from_ros(wheel.pose.pose)
+        heading = start.yaw + math.pi
+        target = Pose.from_xyz_rpy(
+            x=start.x,
+            y=start.y,
+            yaw=heading,
+            reference_frame=self.inputs.context.world.root,
+        )
+        measurement = CabinTurnMeasurement(
+            start,
+            PlanarPose(start.x, start.y, heading),
+            wheel.header.stamp.sec + wheel.header.stamp.nanosec / 1e9,
+            self.inputs.node.get_clock().now().nanoseconds / 1e9,
+            self.options.position_tolerance,
+            self.options.orientation_tolerance_deg,
+        )
+        if not measurement.fresh:
+            self.events.report(
+                "TURN BLOCKED: wheel pose stale; no turn goal sent", problem=True
+            )
+            return EntryPhase.FAILED
+        self.events.report(
+            f"TURN AUTHORIZED: lidar distance={self.inputs.last_assessment.wall_distance:.4f} m; "
+            f"reference={self.options.wall_stop_distance:.4f} m; wheels stopped; entry succeeded"
+        )
+        plan = execute_single(
+            RobocatCabinTurnMotion(
+                target, orientation_tolerance_deg=self.options.orientation_tolerance_deg
+            ),
+            context=self.inputs.context,
+        )
+        self.motion = self.pool.submit(plan.perform)
+        self.cancellation = GoalCancellation(
+            self.inputs.context.giskard_wrapper, self.motion
+        )
+        deadline = time.monotonic() + self.options.motion_timeout
+        stopping_deadline = math.inf
+        failure: EntryPhase | None = None
+        self.events.report(
+            f"TURN: rotating toward doorway with zero forward command; target_yaw={math.degrees(heading):.3f} deg; tolerance={self.options.orientation_tolerance_deg:g} deg"
+        )
+        while True:
+            current = self.navigation.poll()
+            reasons = self.inputs.feedback.blocking_reasons(require_free_mux=False)
+            if (
+                not current
+                or not self.navigation.idle
+                or not self.navigation.routing_ready
+            ):
+                reasons.append("Native navigation is unavailable or owns the base")
+            if (
+                self.inputs.scene is None
+                or self.inputs.scene.fingerprint != self.options.map_fingerprint
+            ):
+                reasons.append("Map changed or is unavailable")
+            wheel = self.inputs.pose_feedback
+            if wheel is None:
+                reasons.append("Wheel pose unavailable")
+            else:
+                measurement = replace(
+                    measurement,
+                    measured=PlanarPose.from_ros(wheel.pose.pose),
+                    stamp=wheel.header.stamp.sec + wheel.header.stamp.nanosec / 1e9,
+                    observed_at=self.inputs.node.get_clock().now().nanoseconds / 1e9,
+                )
+                if not measurement.fresh:
+                    reasons.append("Wheel pose stale or invalid")
+                elif measurement.displacement > measurement.position_tolerance:
+                    reasons.append(
+                        "Base displaced beyond the pure-turn position tolerance"
+                    )
+            terminal = self.motion.done()
+            if terminal and self.motion.exception() is not None:
+                reasons.append(f"Giskard turn failed: {self.motion.exception()!r}")
+            if time.monotonic() > deadline:
+                reasons.append("Turn deadline exceeded")
+            settled = self.inputs.feedback.wheels_settled()
+            if (
+                terminal
+                and self.motion.exception() is None
+                and settled
+                and not measurement.reached
+            ):
+                reasons.append(
+                    "Turn action succeeded but measured final heading or position is outside tolerance"
+                )
+            if failure is None and (reasons or self.stop.requested):
+                failure = (
+                    EntryPhase.CANCELED if self.stop.requested else EntryPhase.FAILED
+                )
+                stopping_deadline = time.monotonic() + 10
+                self.events.report(
+                    "TURN STOPPING: "
+                    + (
+                        "Caller canceled" if self.stop.requested else "; ".join(reasons)
+                    ),
+                    problem=True,
+                )
+            if failure is not None:
+                if not terminal:
+                    self.cancellation.cancel()
+                if terminal and settled:
+                    self.events.report(f"TURN RESULT: {failure}", problem=True)
+                    return failure
+                if time.monotonic() > stopping_deadline:
+                    raise EntryError(
+                        "Turn cancellation/arrest not confirmed; inspect robot before a new request"
+                    )
+            elif terminal and settled and measurement.reached:
+                self.events.report(
+                    f"TURN FINAL: yaw_error={math.degrees(measurement.yaw_error):.3f} deg; displacement={measurement.displacement:.4f} m; wheels stopped; result=succeeded"
+                )
+                return EntryPhase.SUCCEEDED
+            time.sleep(0.1)
 
     def close(self) -> None:
         """Drain cancellation while the ROS context is still alive."""
@@ -578,9 +878,18 @@ class EntryMission:
 def main() -> None:
     """Check connections by default; submit real goals only with explicit execution."""
     options = EntryOptions.parse(remove_ros_args()[1:])
+    if options.profile is not None:
+        print(
+            f"ENTRY PROFILE: {options.profile.value}; explicit CLI overrides applied",
+            flush=True,
+        )
     RobocatEnvironment().validate()
     staging = options.load_staging()
-    if options.doorway_distance is not None and not options.handover_only:
+    if (
+        options.doorway_distance is not None
+        and not options.handover_only
+        and options.inside_waypoint is None
+    ):
         EntryGeometry(staging, options.doorway_distance, options.distance).validate()
     with ExitStack() as cleanup:
         rospy.init_node("robocat_snm")
@@ -599,11 +908,16 @@ def main() -> None:
         context = Context(world=world, robot=robots[0], ros_node=node)
         cleanup.callback(context.giskard_wrapper.close)
         inputs = EntryInputs(node, context, feedback_source=options.feedback)
+        if options.wall_stop_distance is not None:
+            inputs.wall_settings = WallStopSettings(
+                options.wall_stop_distance, tolerance=options.position_tolerance
+            )
         inputs.visibility.allow_isolated_gaps = options.allow_isolated_scan_gaps
         parameters = AsyncParameterClient(node, "giskard")
-        settings = parameters.get_parameters(
-            ["base_feedback_topic", "base_command_topic"]
-        )
+        parameter_names = ["base_feedback_topic", "base_command_topic"]
+        if options.wall_stop_distance is not None:
+            parameter_names.append("wall_stop_supported")
+        settings = parameters.get_parameters(parameter_names)
         deadline = time.monotonic() + 12
         while not stop.requested and time.monotonic() < deadline:
             if (
@@ -619,8 +933,12 @@ def main() -> None:
                 "Giskard configuration unavailable; restart the updated bringup"
             )
         values = settings.result().values
-        if len(values) != 2:
+        if len(values) != len(parameter_names):
             raise EntryError("Giskard feedback and command parameters are missing")
+        if options.wall_stop_distance is not None and not values[2].bool_value:
+            raise EntryError(
+                "Restart updated Giskard: lidar wall stopping is not supported by the running server"
+            )
         options.verify_server_topics(values[0].string_value, values[1].string_value)
         print(
             f"FEEDBACK: {options.feedback.value} ({options.feedback.topic}); wheel stop checks retained",
@@ -647,6 +965,20 @@ def main() -> None:
             and options.map_fingerprint != inputs.scene.fingerprint
         ):
             raise EntryError("The active map does not match the configured fingerprint")
+        inside = None
+        if options.inside_waypoint is not None:
+            staging_document = yaml.safe_load(options.staging.read_text())
+            inside = WaypointConnection().read(
+                options.inside_waypoint, staging_document["parent_key"]
+            )
+            print(
+                f"INSIDE WAYPOINT: {options.inside_waypoint}; map pose={inside}",
+                flush=True,
+            )
+            if options.doorway_distance is not None:
+                options.entry_geometry(
+                    staging, options.doorway_distance, inside=inside
+                ).validate()
         navigation = NavigationConnection(
             staging,
             execute=options.execute and not options.entry_only,
@@ -680,7 +1012,9 @@ def main() -> None:
         if options.handover_only:
             mission.handover(staging)
             return
-        outcome = mission.run(options.entry_geometry(staging, options.doorway_distance))
+        outcome = mission.run(
+            options.entry_geometry(staging, options.doorway_distance, inside=inside)
+        )
         print(f"ENTRY RESULT: {outcome}", flush=True)
         if outcome is not EntryPhase.SUCCEEDED:
             raise EntryError(f"Entry terminated with {outcome}; no automatic restart")

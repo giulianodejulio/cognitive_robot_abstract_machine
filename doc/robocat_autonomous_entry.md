@@ -1,5 +1,9 @@
 # Robocat: passaggio Nav2–Giskard
 
+La prima implementazione supervisionata senza HPM e i comandi aggiornati sono
+descritti in [robocat_snm.md](robocat_snm.md). Le sezioni seguenti documentano
+la preparazione precedente del routing e i requisiti di riferimento.
+
 ## Primo passo: ingressi del mux distinti
 
 Verifica sul robot del 6 novembre 2026: Nav2 (`controller_server`,

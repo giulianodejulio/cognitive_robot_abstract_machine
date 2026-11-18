@@ -17,10 +17,10 @@ non sono state aggiunte collisioni o nuove regole al Giskard attivo.
 Il 6 novembre la normale di `elevator_doorway` è stata corretta dal fondo
 misurato della cabina, imponendo il parallelismo varco/fondo. Centro in
 odom inizialmente invariato; yaw corretto di circa −5,75°. File precedenti conservati
-con suffisso `.before_parallel_correction`.
+nella cronologia Git del fork, prima della pulizia del 18 novembre.
 La successiva verifica aperta degli stipiti ha portato a spostare il centro
 di 9 cm verso destra, mantenendo la yaw e trasformando le pareti senza
-spostare le superfici fisiche. Backup `.before_centre_correction`.
+spostare le superfici fisiche. Le copie intermedie sono conservate nella cronologia Git del fork.
 
 ## Percorso candidato
 

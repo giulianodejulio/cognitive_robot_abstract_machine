@@ -13,6 +13,7 @@ from std_msgs.msg import Header
 
 from experiments.robocat_safety import FeedbackSource
 from experiments.robocat_snm.geometry import EntryAssessment
+from experiments.robocat_snm.map_alignment import MapAlignmentEvidence
 from experiments.tiago_goal_logging import PlanarPose
 from semantic_digital_twin.spatial_types import Pose
 
@@ -57,6 +58,9 @@ class PoseComparison:
     """Native world synchronization does not provide an acquisition timestamp."""
     assessment: EntryAssessment | None = None
     """Entry precision and rear-clearance quantities computed from this odometry sample."""
+
+    map_alignment: MapAlignmentEvidence | None = None
+    """Actual timestamps used for the frozen map-to-odometry alignment."""
 
     @staticmethod
     def planar(pose: Pose) -> PlanarPose:

@@ -58,6 +58,13 @@ Il comando `robocat-goal` e la sequenza con FIFO Robocat restano gli stessi.
 La precisione fisica dell'odometria ruote, specialmente con slittamenti sulla
 soglia dell'ascensore, resta da validare.
 
+Il bringup Python Robocat nasconde per impostazione predefinita i messaggi noti
+del parser sui campi URDF ignorati e l'avviso del database opzionale assente.
+Gli altri messaggi e gli errori operativi restano visibili. Per rivedere questi
+avvisi avviando direttamente il server, aggiungere `--verbose` a
+`scripts/robocat_giskard_bringup.py`. Il filtro vale solo durante `server.setup()`
+e non modifica il modello né i controlli del robot.
+
 Il launcher imposta l'ambiente ROS dedicato e avvia entrambi i processi,
 senza inviare goal né attivare controller hardware. Attendere `STACK READY`
 e `GOALS ENABLED`. Gli interblocchi possono impedire i goal senza terminare

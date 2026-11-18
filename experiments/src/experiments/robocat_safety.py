@@ -15,6 +15,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 
 from scripts.tiago_giskard_goal import BaseFeedback
+from experiments.robocat_snm.odometry_history import OdometryHistory
 
 
 # %% safety streams
@@ -132,6 +133,18 @@ class RobocatFeedback(BaseFeedback):
                 qos_profile_sensor_data,
             ),
         ]
+
+    wheel_history: OdometryHistory = field(default_factory=OdometryHistory, init=False)
+    """
+    Recent wheel poses for scan acquisition-time association.
+    """
+
+    def receive_wheels(self, message: Odometry) -> None:
+        """
+        Retain acquisition-time history after updating the base feedback.
+        """
+        super().receive_wheels(message)
+        self.wheel_history.samples.append(message)
 
     def receive_emergency(self, message: Bool) -> None:
         super().receive_emergency(message)

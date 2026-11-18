@@ -20,6 +20,38 @@ geometria, compilazione del task nativo, trasporto locale a pipe, cancellazione,
 diagnostica e regressioni dei launcher/routing Robocat. Eseguiti nel container,
 con `--orm-build never`, un thread BLAS e limite di memoria virtuale di 2,5 GiB.
 
+## Profilo dell'ascensore validato
+
+Nel terminale SNM del container:
+
+```bash
+bash scripts/robocat-entry --profile elevator \
+  --execute --doors-held-open --bootstrap-navigation
+```
+
+Il profilo è salvato in `config/robocat_entry/elevator.yaml`. Contiene gli stessi
+valori delle prove riuscite: feedback wheel, `elevator_inside`, arresto lidar
+rispetto al fondo a 0.936 m con tolleranza 0.05 m, soglia a 0.86 m dallo staging,
+tolleranze staging 0.10 m / 10°, apertura iniziale mantenuta e fingerprint della
+mappa validata. Il profilo non modifica i parametri Nav2 o i limiti del server
+Giskard; questi restano gestiti dall'infrastruttura.
+
+`--execute`, `--doors-held-open` e `--bootstrap-navigation` restano autorizzazioni
+esplicite della singola prova. Senza `--execute` il comando esegue soltanto i
+controlli in lettura. `--doors-held-open` conferma che le porte resteranno aperte
+durante l'attraversamento: possono essere inizialmente chiuse.
+
+Aggiungere `--verbose` per il log approfondito. Un'opzione esplicita prevale sul
+profilo indipendentemente dall'ordine degli argomenti, per esempio
+`--position-tolerance 0.06`. `--distance` sostituisce il waypoint interno ereditato.
+Le combinazioni non supportate restano bloccate, ad esempio feedback laser con
+arresto lidar longitudinale. Le verifiche sulla mappa e sugli interlock restano
+attive. Dopo una nuova mappa o una nuova calibrazione aggiornare e rivalidare il
+profilo, senza copiare automaticamente il fingerprint della mappa corrente.
+
+Non occorre riavviare l'infrastruttura per usare il profilo: basta avviare una
+nuova richiesta `robocat-entry`.
+
 ## Sequenza
 
 1. Controllo del server Giskard: feedback wheel e comando `/snm_vel`.
@@ -638,3 +670,349 @@ also recorded when available. Check that the completed bag lists
 server diagnostics from an older Giskard process that has not been restarted.
 The bag supports comparisons of the software's poses and decisions; it does not
 provide independent physical ground truth for odometry accuracy.
+
+### PAL-compatible Giskard dynamics (2026-11-17)
+
+The Robocat bringup now passes `RobocatMotionLimits` to both the world and the
+hardware interface and explicitly passes its QP configuration to Giskard.
+The bounds are the PAL values read on 2026-11-17, not dynamically fetched at
+startup: linear acceleration/deceleration magnitude 0.6 m/s², jerk magnitude
+2 m/s³; angular acceleration/deceleration magnitude 1 rad/s² and jerk magnitude
+5 rad/s³. Velocity CLI arguments and the 20 Hz control frequency remain unchanged.
+PAL's configuration is not modified by this change.
+
+The prediction horizon uses the existing `JerkLimitedBraking` helper and includes
+resting steps. It grows with the selected maximum speed. At 0.3 m/s and 0.2 rad/s
+it is 30 steps at 50 ms, or 1.5 seconds, instead of the previous seven steps.
+Giskard's native acceleration-safe calculation conservatively lowers the
+resolved jerk further: 0.6 m/s³ linear and 2.5 rad/s³ angular at these speeds.
+The declared jerk values above are upper bounds, not a demand to attain them.
+The generic QP `braking_time` default remains the fallback for other unbounded
+DOFs; the Robocat drive now has explicit dynamics bounds instead.
+
+Restart Giskard/infrastructure to load the change. The terminal prints DYNAMICS
+with acceleration/jerk caps and the calculated horizon. No motion goal is sent
+at startup. Offline optimized straight-motion tests check acceleration and jerk
+of the resulting commands. Real braking performance still needs validation in
+space clear of obstacles before the elevator test. This change does not yet
+alter native success latching, measured-stop certification, or goal tolerances.
+
+### Measured-stop completion for the supervised straight entry (2026-11-17)
+
+The default straight entry, including `--retain-door-clearance`, now uses
+`RobocatEntryMotion`. It reuses the native straight-position and orientation
+constraints in a Parallel goal and adds `MeasuredBaseStop` together with the
+native `LocalMinimumReached` commanded-velocity monitor. The parent sequence
+cannot finish this goal solely because the pose passed through its tolerance:
+both pose observations, measured wheel settling and native commanded-velocity
+settling must hold. Position/orientation constraints therefore
+remain active during deceleration and can recover an overshoot before completion.
+No goal tolerance is widened and no second movement request is submitted.
+
+The monitor reuses the real base interface's existing wheel feedback. It requires
+at least three stationary samples spanning 0.2 seconds, below the existing
+0.005 m/s and 0.01 rad/s thresholds, plus a wheel timestamp age at most 0.5 seconds.
+Missing/stale samples are unknown, never evidence of rest. Wheel settling remains
+measured from wheels even with laser pose feedback. Servers lacking the measured
+feedback context reject this goal at compilation rather than accepting model-only
+settling. Restart the Giskard server once before invoking the updated client.
+
+The monitor's stamp, measured velocities, freshness and settled verdict are now
+included as the `measured_base_stop` row of `/giskard/goal_diagnostics`;
+`commanded_base_stop` exposes the corresponding native velocity verdict. The existing
+entry recorder already records this topic. No extra recording flag is needed.
+The client prints `COMPLETION: position and orientation in tolerance plus fresh
+measured wheel settling` for this mode. SNM still performs its independent final
+pose and full-chassis-clearance checks after the motion result.
+
+This entry-specific change leaves the generic `robocat-goal` mapping and the
+separate experimental `--pass-door-action` navigation stages unchanged. It uses
+the same CLI command as the previously tested straight entry. Offline regression
+checks reproduce transient goal attainment followed by overshoot and verify that
+constraints remain running until the stopped pose satisfies both tolerances.
+Real stopping accuracy, smoothness and responsiveness still require operator-run
+validation; no robot movement was performed during implementation.
+
+### Independent final entry bounds (2026-11-17)
+
+The baseline straight entry, including `--retain-door-clearance`, now uses
+independent final bounds: 2 cm longitudinally, 5 cm laterally and 5 degrees
+in heading. The target, native straight-position/orientation constraints and
+PAL-compatible acceleration/jerk limits are unchanged. The native task retains
+its Euclidean error for diagnostics; its completion observation uses the two
+axis bounds. `/giskard/goal_diagnostics` also reports the individual residuals
+and thresholds. Fresh measured wheel settling and commanded settling remain
+required. SNM applies the same axis bounds after arrest and additionally checks
+rear clearance beyond the doorway plus margin and the complete chassis inside
+the checked corridor, including its rotated footprint. These checks use the
+configured geometry and selected odometry, not physical ground truth.
+
+This prevents the recorded 2.61 cm lateral residual from indefinitely blocking
+an otherwise stopped longitudinal arrival. It does not diagnose or guarantee
+elimination of `MotorHighDiscrepancyError`. Experimental `--pass-door-action`
+keeps its separate native motion implementation. Restart Giskard and launch a
+new SNM request after installing this change; no robot movement is needed to
+install it.
+
+### Entry toward a saved Eulero cabin waypoint (2026-11-17)
+
+Use `--inside-waypoint elevator_inside` instead of `--distance`. A full
+`building/floor/name` key is also accepted, on the same floor as the staging
+YAML. Before requesting Nav2 motion, the client reads the enabled waypoint
+through the existing host-authenticated SSH connection and native Eulero
+`get_waypoint` service. The floor pose is transformed into `map` using native
+TF. No waypoint is modified. The full position and heading are retained,
+including lateral displacement; after handover the same target is frozen in
+selected odometry and used for final assessment. A missing, disabled, wrong-floor
+or incompatible straight-entry waypoint fails before Nav2 motion.
+
+The threshold calibration remains necessary for doorway perception and chassis
+clearance checks. `--inside-waypoint` changes the destination, not the doorway
+reference. It does not reconstruct door thickness or certify physical clearance
+from odometry alone. Keep a visually validated inside waypoint with clearance.
+Staging still comes from `--staging` (the saved YAML), not a new Eulero lookup.
+The supported comparison here uses the baseline motion with retained clearance.
+
+For the first trial, explicitly use 5 cm longitudinal acceptance, the existing
+5 cm lateral acceptance and 5 degrees heading. Defaults remain 2 cm
+longitudinal and 5 degrees for requests without these flags. Native measured
+wheel settling, commanded settling, model/interlock/scan checks and final
+chassis containment are retained. PAL-compatible dynamics are unchanged.
+Relaxed acceptance reduces the need for terminal precision corrections; it does
+not guarantee elimination of the unidentified motor-driver fault.
+
+Start the recorder in a separate container terminal before the request:
+
+```bash
+bash scripts/robocat-record-entry
+```
+
+With current wheel-feedback infrastructure and valid localization, run in the
+SNM container terminal:
+
+```bash
+bash scripts/robocat-entry --execute --bootstrap-navigation \
+  --feedback wheel --retain-door-clearance \
+  --inside-waypoint elevator_inside \
+  --doorway-distance 0.86 \
+  --position-tolerance 0.05 --orientation-tolerance-deg 5 \
+  --staging-position-tolerance 0.10 \
+  --staging-orientation-tolerance-deg 10 \
+  --doors-held-open \
+  --map-fingerprint 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda
+```
+
+Check `INSIDE WAYPOINT` and `COMPLETION` in the log. Native goal diagnostics and
+SNM final assessments are already recorded; the entry state stream includes
+the saved waypoint identity and map target. Stop recording five seconds after
+physical arrest. There is no automatic retry after a failure.
+
+### Lidar-referenced longitudinal stopping (2026-11-17)
+
+This opt-in experiment keeps wheel odometry for motion tracking and updates the
+longitudinal Giskard endpoint from a real cabin-wall measurement. Use
+`--wall-stop-distance 0.936`: this is the perpendicular distance from
+`base_footprint` to the wall observed at the manual inside reference, not a
+lidar-origin range and not the distance to travel from staging. The 0.113 m
+sensor offset is read from the robot model. `elevator_inside` remains the
+nominal map target and retained travel heading.
+
+A broad front-wall fit is obtained from finite rays in the forward +/-15 degree
+sector. Quality guards require at least 30 rays, 0.30 m observed span and at
+most 1 cm fit RMS; the wall normal must be within 20 degrees of base forward.
+This is geometric tracking in the calibrated, empty cabin, not semantic wall
+recognition or human perception. Doors must be held open and the path/cabin
+kept clear for this first experiment.
+
+The source scan is associated with wheel odometry at acquisition time (maximum
+separation 0.05 s) and projected to the current wheel pose. Scan and wheel
+freshness are checked separately at 0.5 s. The nominal endpoint may be corrected
+by at most 0.40 m along its fixed heading; updates after acquisition are filtered
+with a 0.2 s time constant and rate-limited to 0.10 m/s. Unexplained plane shifts
+above 8 cm or normal changes above 5 degrees are rejected. There is no fallback
+to the old target when wall evidence is unavailable. These are conservative
+trial defaults, not a claimed calibration of lidar uncertainty.
+
+The native Giskard position-constraint builder and QP continue to generate the
+command. PAL acceleration/jerk bounds are unchanged. A native heading objective
+retains the nominal direction; 15 degrees is a safety acceptance bound rather
+than a precise terminal yaw requirement. There is no final lateral point
+objective in this mode. SNM still checks the footprint in its configured corridor,
+the remaining lidar-observed passage, interlocks and model/feedback consistency.
+
+Success requires fresh measured wheel settling, native commanded settling and
+wall distance within the configured longitudinal band (use 0.936 +/-0.05 m for
+the first test). SNM uses the same fitter and distance definition. The recorded
+`WALL FINAL` verdict replaces nominal waypoint precision and the old odometric
+rear-plane certificate. It means agreement with the physically validated inside
+reference, including the assumed 5 cm clearance allowance around that reference;
+it does not independently measure the door's swept volume. The operator must
+have selected a reference pose with enough physical margin. Loss of the wall or
+invalid data aborts; after movement has begun, a base remaining settled outside
+the distance band for 1 s also aborts, without automatic recovery or retry.
+This bounds stationary precision attempts but does not guarantee prevention of
+an unidentified firmware motor fault.
+
+Restart the infrastructure's Giskard server after installing the change. The
+client checks `wall_stop_supported` before asking Nav2 to approach staging.
+The new goal requires the server's existing real scan and wheel context.
+
+Run the recorder first in a separate CRAM container terminal:
+
+```bash
+bash scripts/robocat-record-entry
+```
+
+Then run from the SNM container terminal:
+
+```bash
+bash scripts/robocat-entry --execute --bootstrap-navigation \
+  --feedback wheel --retain-door-clearance \
+  --inside-waypoint elevator_inside \
+  --wall-stop-distance 0.936 \
+  --doorway-distance 0.86 \
+  --position-tolerance 0.05 \
+  --staging-position-tolerance 0.10 \
+  --staging-orientation-tolerance-deg 10 \
+  --doors-held-open \
+  --map-fingerprint 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda
+```
+
+The startup log includes `LIDAR STOP` and the actual completion band. Stop the
+recorder five seconds after physical arrest. It now records
+`/snm/wall_tracking`: distance, residual, scan/wheel timestamps, correction,
+updated longitudinal endpoint, fit quality and validity reason. Native
+`/giskard/goal_diagnostics` also includes the wall task's exact decision sample.
+`/snm/pose_comparison` retains odometric quantities and records the final wall
+assessment; wheel-derived rear clearance is not the wall-mode success criterion.
+Omit `--wall-stop-distance` to use the preceding waypoint experiment.
+
+### Timestamp-aligned staging TF (2026-11-17)
+
+A delayed map-to-base TF is now paired with selected odometry at its own
+acquisition timestamp. The measured displacement from that historical pose to
+the current selected odometry pose propagates the map pose to the current
+sample; no velocity extrapolation is used. The frozen target retains that exact
+sample, rather than reading a newer odometry message after localization.
+TF freshness (2 s), current feedback freshness (0.5 s) and acquisition matching
+(0.25 s) remain independent checks. Missing historical matches still block.
+`MAP ALIGNMENT` logs the three timestamps, also recorded under `map_alignment`
+in `/snm/pose_comparison`. This fixes comparisons of a delayed TF against the
+latest wheel timestamp; it does not fix geometric AMCL localization error.
+
+### Detailed terminal diagnostics
+
+Append `--verbose` to the usual `bash scripts/robocat-entry ...` command.
+The default output stays unchanged. Verbose mode prints snapshots approximately
+once per second, immediately on changed phase/blockers, and at completion.
+
+- `VERBOSE TIMING`: source scan/selected feedback ages, latest timestamp difference,
+  and the odometry timestamp actually matched to scan acquisition.
+- `VERBOSE WALL`: measured base-to-wall distance, calibrated reference, error,
+  filtered longitudinal target and nominal-target correction, with limits.
+- `VERBOSE WALL CHECK`: candidate wall distance jump and normal rotation, with
+  the continuity and timestamp matching bounds.
+- `VERBOSE WALL FIT`: beam count, observed span, residual and normal.
+- `VERBOSE PASSAGE`: unknown and blocked section positions along the staging axis.
+  An empty list can also mean the passage was not evaluated because an earlier
+  guard failed; consult the normal `blockers` line and timing/wall validity.
+
+`nan` means a quantity was not available in that observation. These diagnostics
+do not change motion, thresholds or cancellation decisions. A new client invocation
+is sufficient for terminal tracing; restart Giskard to include the new wall jump
+fields in its recorded native decision snapshots as well.
+
+### Temporizzazione delle osservazioni SNM
+
+I topic arrivano in modo asincrono: non è richiesto che scan e odometria abbiano
+la stessa frequenza. SNM cattura i riferimenti ai messaggi selezionati prima di
+leggere il tempo ROS della valutazione. La posa, il controllo parete e la
+telemetria usano gli stessi campioni: una callback successiva non sostituisce il
+campione wheel a metà del controllo parete.
+
+Prima di restituire un'osservazione valida, SNM verifica nuovamente l'età dei
+campioni al termine del calcolo. Se sono scaduti durante l'elaborazione, scarta
+il verdetto e ripete una sola volta la valutazione su nuovi dati disponibili.
+Se anche quella valutazione scade, blocca l'ingresso. Un interlock o feedback
+non valido continua a bloccare subito; non viene ritentato alcun goal.
+I limiti restano 0.5 s per la freschezza, 0.25 s per l'associazione scan/posa del
+passaggio e 0.05 s per l'associazione scan/wheel del controllo parete.
+
+Con `--verbose`, `VERBOSE EVALUATION` mostra tempo iniziale e finale della
+valutazione restituita, durata, numero di tentativi e età finale dei campioni.
+Le scadenze della missione usano il tempo monotono locale; i confronti con
+`header.stamp` usano il tempo ROS e richiedono orologi robot/laptop sincronizzati.
+Questa correzione è nel client SNM: basta rilanciare `robocat-entry`, senza
+riavviare Giskard o infra.
+
+## Rotazione opzionale dopo l'ingresso
+
+Per il test ingresso seguito da orientamento verso la porta:
+
+```bash
+bash scripts/robocat-entry --profile elevator \
+  --execute --doors-held-open --bootstrap-navigation --turn-after-entry
+```
+
+Senza `--turn-after-entry` la sequenza resta quella di solo ingresso. La nuova
+opzione richiede la modalità con arresto lidar e non è compatibile con
+`--handover-only`.
+
+Dopo il successo Giskard dell'ingresso e la certificazione SNM, una nuova
+osservazione deve confermare distanza lidar entro tolleranza, base ferma,
+feedback validi e navigazione inattiva. Se l'arrivo longitudinale non è
+certificato, la rotazione non viene inviata e la richiesta termina bloccata.
+Un ingresso fallito non avvia mai il secondo movimento.
+
+La seconda azione riusa `CartesianOrientation` e `ZeroForwardVelocity` dal
+percorso pure-turn esistente. Il target yaw è quello wheel misurato da fermo
+all’autorizzazione più 180 gradi; il comando longitudinale viene mantenuto a zero, senza correzioni di
+posizione. La conclusione richiede orientamento entro
+`orientation_tolerance_deg` (5 gradi nel profilo), arresto comandato e arresto
+wheel misurato. SNM verifica anche che lo spostamento dal centro iniziale non
+superi `position_tolerance` (5 cm nel profilo), senza tentare un recupero di
+posizione.
+
+Durante il giro il lidar cambia direzione di osservazione: non viene mantenuto
+il target rispetto alla parete di fondo né riutilizzato il corridoio rettilineo
+d'ingresso. La validazione della distanza dal fondo è il gate prima del giro.
+Restano i controlli su dati wheel freschi, interlock, driver, mappa e proprietà
+della base. Errori, timeout o Ctrl+C cancellano il goal posseduto e attendono
+l'arresto, senza ripartenza automatica. Lo spazio per il giro è assunto già
+verificato dall'operatore; questa opzione non aggiunge una nuova valutazione
+dell'ingombro nella cabina.
+
+Il recorder esistente raccoglie già odometrie, TF, comandi, diagnostica Giskard
+e gli eventi `TURN AUTHORIZED`, `TURN`, `TURN FINAL`/`TURN RESULT`. Tenerlo attivo
+fino a qualche secondo dopo l'arresto finale del giro.
+
+Il task nativo `CartesianOrientation` usa ora la distanza quaternionica minima
+in [0, pi] per il progresso e il raggiungimento. Angoli equivalenti modulo
+2 pi non producono più un errore crescente mentre il robot si avvicina al goal.
+La direzione del mezzo giro può essere oraria o antioraria; il target è sempre
+opposto all'heading misurato iniziale. Tolleranze, timeout e limiti PAL restano
+invariati. Dopo questo aggiornamento occorre riavviare il server Giskard, che
+costruisce il monitor; il solo riavvio del client SNM non basta.
+
+### Riduzione del costo del ciclo SNM
+
+La profilazione offline sui dati di `entry-20261118-120826` ha individuato due
+costi ripetuti: il distance transform dell'intera occupancy grid a ogni controllo
+statico e le trasformazioni simboliche degli estremi di ogni sezione del corridoio.
+
+La mappa delle distanze viene ora riutilizzata finché il fingerprint della mappa
+rimane identico. Cambiamenti di celle, risoluzione o geometria invalidano la cache;
+la soglia di clearance continua a essere applicata a ogni percorso. Il primo
+calcolo avviene già nel controllo geometrico dell'handover, prima del movimento.
+Le sezioni usano una sola trasformazione compensata per osservazione e preparano
+gli estremi direttamente nel frame del sensore, continuando a usare il controllo
+nativo `LidarReading.distances_to_segment` e le stesse regole di `SegmentVisibility`.
+
+Su otto valutazioni profilate degli stessi dati, dopo inizializzazione delle
+cache, il tempo medio è sceso da circa 200 ms a 78 ms (circa 61% in meno).
+È una misura offline sul laptop, non una garanzia dei tempi sotto ogni carico.
+Restano invariati freschezza di 500 ms, associazione temporale, numero e spaziatura
+delle sezioni, gestione di ostacoli/raggi invalidi, timeout della missione e limiti
+Giskard. Il benchmark conserva lo stesso verdetto di varco/passaggio libero.
+Per la validazione reale rilanciare il client con `--verbose`, registrando il bag
+fino all'arresto finale. Non occorre riavviare infra o Giskard.

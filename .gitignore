@@ -209,3 +209,7 @@ basstler/board.json
 # Private runtime connections and test output.
 /.robocat-planner/
 /tmp/
+
+# Superseded manual backup copies.
+/scripts/*.bak
+/doc/*.before_*

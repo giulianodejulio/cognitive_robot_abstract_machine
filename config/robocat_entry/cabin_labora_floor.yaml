@@ -1,0 +1,47 @@
+name: elevator_cabin
+tf_child_frame: elevator_cabin_labora_floor
+frame_id: map
+parent_key: labora_demo/labora_floor
+map_key: labora_demo/labora_floor/elevator_v2_map
+map_yaml: /home/pal/robocat_elevator_mapping_20261109/elevator_v2_precise.yaml
+map_fingerprint: 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda
+captured_at: 1795014602.5253
+origin: Back-left physical corner, viewed from the doorway toward the back wall; projected
+  onto floor
+axes:
+  x: Toward doorway, perpendicular to back wall
+  y: Along back wall toward cabin interior (right when viewed from doorway)
+  z: Up
+pose:
+  position:
+    x: 20.075744582908843
+    y: -33.79216625757321
+    z: 0.0
+  orientation:
+    x: 0.0
+    y: 0.0
+    z: 0.3262389338455842
+    w: 0.9452873415228285
+yaw_radians: 0.6646441495237402
+inside_tape_reference:
+  frame_id: elevator_cabin_labora_floor
+  position:
+    x: 0.93163630988803
+    y: 0.5146729055167327
+    z: 0.0
+  yaw_radians: -3.1301336735116667
+  source: Current manually positioned robot on tape; existing elevator_inside waypoint
+    unchanged
+fit_quality:
+  observations: 19
+  corner_map_spread_x_m: 0.00965237298742494
+  corner_map_spread_y_m: 0.004350316247773378
+  yaw_spread_deg: 0.8184982879438043
+  back_distance_m: 0.9319596949937135
+  left_distance_m: 0.5182643467218451
+  right_distance_m: 0.5652685900010852
+  back_wall_rms_m: 0.0053732259404321026
+  left_wall_rms_m: 0.007052856500052979
+scope: Calibration for this floor and map only, while cabin is at the floor; not automatically
+  activated on another map
+capture_directory: /home/gdj/workspaces/robocat_experiments/cabin_frame_20261118

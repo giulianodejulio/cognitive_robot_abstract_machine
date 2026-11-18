@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# %% native Eulero waypoint acquisition from the laptop host
+set -euo pipefail
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ $# -lt 1 || $# -gt 2 || ! $1 =~ ^[A-Za-z][A-Za-z0-9_-]*$ || ( $# -eq 2 && $2 != --check ) ]]; then
+    printf 'Usage: bash scripts/robocat-save-waypoint NAME [--check]\n' >&2
+    exit 2
+fi
+remote_directory=$(ssh -o BatchMode=yes -o ConnectTimeout=5 robocat 'mktemp -d /tmp/robocat-waypoint.XXXXXX')
+trap 'ssh -o BatchMode=yes -o ConnectTimeout=5 robocat "rm -rf -- '\''$remote_directory'\''" </dev/null || true' EXIT
+tar -C "$repository" -cf - scripts/robocat_save_waypoint.py scripts/robocat_waypoint_record.py |
+    ssh -o BatchMode=yes robocat "tar -xf - -C '$remote_directory'"
+printf -v arguments '%q ' "$@"
+ssh -t -o BatchMode=yes robocat "bash -lc 'source /opt/ros/humble/setup.bash; source /opt/pal/alum/setup.bash; export ROS_DOMAIN_ID=102 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp PYTHONPATH=$remote_directory:\${PYTHONPATH:-}; cd $remote_directory; exec python3 -u -m scripts.robocat_save_waypoint $arguments'"

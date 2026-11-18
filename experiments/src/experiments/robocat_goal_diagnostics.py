@@ -5,7 +5,7 @@ Immutable ROS snapshots of native Giskard task decisions before QP integration.
 # %% imports
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -14,6 +14,11 @@ from rclpy.publisher import Publisher
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from giskardpy.executor import Executor
+from experiments.robocat_completion import MeasuredBaseStop
+from experiments.robocat_snm.entry_motion import EntryPositionStraight
+from experiments.robocat_snm.lidar_entry import LidarLongitudinalTask
+from experiments.robocat_wall import WallTelemetry
+from giskardpy.motion_statechart.monitors.monitors import LocalMinimumReached
 from giskardpy.middleware.ros2.action_server import ActionServerHandler
 from giskardpy.middleware.ros2.control_loop import ControlLoop
 from giskardpy.middleware.ros2.scripts.iai_robots.robocat import RobocatOdometrySource
@@ -154,6 +159,9 @@ class GoalDecisionObserver(StateHistoryObserver):
                     CartesianPositionStraight,
                     CartesianOrientation,
                     EndMotion,
+                    MeasuredBaseStop,
+                    LocalMinimumReached,
+                    LidarLongitudinalTask,
                 ),
             ):
                 continue
@@ -164,7 +172,27 @@ class GoalDecisionObserver(StateHistoryObserver):
                 "life_cycle": str(task.life_cycle_state),
             }
             status = DiagnosticStatus(name=str(task.name), message=stage.value)
-            if not isinstance(task, EndMotion):
+            if isinstance(task, MeasuredBaseStop):
+                values["measured_stop.maximum_age"] = str(task.maximum_age)
+                if task.last_sample is not None:
+                    values.update(
+                        {
+                            f"measured_stop.{key}": str(value)
+                            for key, value in asdict(task.last_sample).items()
+                        }
+                    )
+            elif isinstance(task, LidarLongitudinalTask):
+                values["threshold"] = str(task.threshold)
+                if task.last_sample is not None:
+                    telemetry = WallTelemetry(
+                        task.last_sample, task.settings
+                    ).to_message(self.node.get_clock().now().nanoseconds / 1e9)
+                    values.update(
+                        {item.key: item.value for item in telemetry.status[0].values}
+                    )
+                    values["task_error"] = str(abs(task.last_sample.error))
+                status.hardware_id = str(task.tip_link.name)
+            elif not isinstance(task, (EndMotion, LocalMinimumReached)):
                 values.update(self.task_values(task))
                 status.hardware_id = str(task.tip_link.name)
             status.values = [
@@ -210,6 +238,19 @@ class GoalDecisionObserver(StateHistoryObserver):
                     "target.x": str(float(target.x.evaluate()[0])),
                     "target.y": str(float(target.y.evaluate()[0])),
                     "target.z": str(float(target.z.evaluate()[0])),
+                }
+            )
+        if isinstance(task, EntryPositionStraight):
+            rotation = (
+                task.root_T_goal_reference_frame.rotation_matrix @ task.goal_orientation
+            )
+            residual = rotation.inverse() @ (current.position - target)
+            values.update(
+                {
+                    "longitudinal_error": str(float(residual[0].evaluate()[0])),
+                    "lateral_error": str(float(residual[1].evaluate()[0])),
+                    "longitudinal_tolerance": str(task.threshold),
+                    "lateral_tolerance": str(task.lateral_tolerance),
                 }
             )
         return values

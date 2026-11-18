@@ -2,7 +2,7 @@
 
 Map acquired on 2026-11-09, with the two component-42 spurious occupied cells
 cleared on 2026-11-13. This is the map used in the 2026-11-16 entry tests, not
-the older merged map or the 2026-11-06 map retained elsewhere in this repository.
+the older merged map. The superseded 2026-11-06 map is retained in Git history.
 
 - Eulero building/floor: `labora_demo/labora_floor`.
 - Map name: `elevator_v2_map`.

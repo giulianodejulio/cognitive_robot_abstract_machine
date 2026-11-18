@@ -24,10 +24,8 @@ from giskardpy.middleware.ros2.giskard import Giskard
 from giskardpy.middleware.ros2.graceful_shutdown import GracefulShutdownSignals
 from giskardpy.middleware.ros2.scripts.iai_robots.robocat import (
     RobocatBaseInterface,
+    RobocatMotionLimits,
     WorldWithRobocatConfig,
-)
-from giskardpy.middleware.ros2.scripts.iai_robots.tiago.single_arm import (
-    BaseVelocityLimits,
 )
 from giskardpy.middleware.ros2.server_config import ExecutionMode, GiskardServerConfig
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
@@ -53,7 +51,8 @@ def main() -> None:
     )
     options = parser.parse_args(remove_ros_args()[1:])
     RobocatEnvironment().validate()
-    limits = BaseVelocityLimits(options.max_linear, options.max_angular)
+    limits = RobocatMotionLimits(options.max_linear, options.max_angular)
+    controller_configuration = limits.controller_configuration()
     with ExitStack() as cleanup:
         rospy.init_node("giskard")
         cleanup.callback(rospy.shutdown)
@@ -73,6 +72,7 @@ def main() -> None:
             ),
             robot_interface_config=RobocatBaseInterface(velocity_limits=limits),
             server_config=GiskardServerConfig(execution_mode=ExecutionMode.CLOSED_LOOP),
+            qp_controller_config=controller_configuration,
         )
         with ExitStack() as startup:
             if not options.verbose:
@@ -105,6 +105,12 @@ def main() -> None:
         )
         print(
             "DIAGNOSTICS: /giskard/goal_diagnostics (native decision snapshots)",
+            flush=True,
+        )
+        print(
+            f"DYNAMICS: linear acceleration={limits.linear.acceleration:g} m/s^2, jerk<={limits.linear.jerk:g} m/s^3; "
+            f"angular acceleration={limits.angular.acceleration:g} rad/s^2, jerk<={limits.angular.jerk:g} rad/s^3; "
+            f"QP {controller_configuration.target_frequency:g} Hz, horizon={controller_configuration.prediction_horizon} steps",
             flush=True,
         )
         server.motion_server.live()

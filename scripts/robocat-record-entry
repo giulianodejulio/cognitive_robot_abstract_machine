@@ -16,7 +16,7 @@ printf 'Recording: %s\nNo movement goal is sent. Stop with Ctrl+C a few seconds 
 exec ros2 bag record -s sqlite3 --include-hidden-topics \
     --qos-profile-overrides-path "$repository/doc/robocat_entry_bag_qos.yaml" \
     -o "$output" \
-    /snm/pose_comparison /snm/entry_state /snm_vel /giskard/goal_diagnostics \
+    /snm/pose_comparison /snm/wall_tracking /snm/entry_state /snm_vel /giskard/goal_diagnostics \
     /scan /direct_laser_odometry/odom /mobile_base_controller/odom \
     /joint_states /diagnostics /power/is_emergency /joy_priority \
     /tf /tf_static /map /robot_description /entry_preview_markers /rosout \

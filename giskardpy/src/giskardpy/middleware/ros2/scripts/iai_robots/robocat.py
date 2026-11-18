@@ -1,7 +1,8 @@
 # %% imports
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 
@@ -9,6 +10,8 @@ from rclpy.qos import QoSProfile, LivelinessPolicy, ReliabilityPolicy, Durabilit
 from krrood.ormatic.utils import classproperty
 
 from experiments.robocat_safety import RobocatFeedback, RobocatTopic
+from experiments.robocat_completion import MeasuredStopContext
+from experiments.robocat_snm.lidar_entry import WallControlContext
 from giskardpy.middleware.ros2 import rospy
 from giskardpy.middleware.ros2.robot_interface_config import RobotInterfaceConfig
 from giskardpy.middleware.ros2.scripts.iai_robots.tiago.single_arm import (
@@ -17,6 +20,8 @@ from giskardpy.middleware.ros2.scripts.iai_robots.tiago.single_arm import (
     TiagoBaseCommandPublisher,
 )
 from giskardpy.model.world_config import WorldWithDiffDriveRobot
+from giskardpy.qp.jerk_limited_braking import JerkLimitedBraking
+from giskardpy.qp.qp_controller_config import QPControllerConfig
 from semantic_digital_twin.adapters.ros.input_synchronization import (
     LatestJointStateSynchronizer,
     SubscribedBasePoseSource,
@@ -30,6 +35,94 @@ from semantic_digital_twin.datastructures.lidar_reading import LidarReading
 from semantic_digital_twin.robots.robocat import Robocat
 from semantic_digital_twin.robots.robot_parts import AbstractRobot
 from semantic_digital_twin.world_description.connections import DifferentialDrive
+from semantic_digital_twin.world_description.degree_of_freedom import DegreeOfFreedom
+
+
+# %% PAL-compatible solver dynamics
+@dataclass(frozen=True)
+class RobocatAxisDynamics:
+    """
+    Symmetric acceleration and jerk bounds for one real base axis.
+    """
+
+    acceleration: float
+    """
+    Maximum acceleration and deceleration magnitude in SI units.
+    """
+
+    jerk: float
+    """
+    Maximum magnitude of acceleration change per second in SI units.
+    """
+
+    def apply_to(self, degree: DegreeOfFreedom) -> None:
+        """
+        Constrain both directions of the solver degree of freedom.
+        """
+        degree.limits.lower.acceleration = -self.acceleration
+        degree.limits.upper.acceleration = self.acceleration
+        degree.limits.lower.jerk = -self.jerk
+        degree.limits.upper.jerk = self.jerk
+
+    def braking(self, velocity: float, time_step: timedelta) -> JerkLimitedBraking:
+        """
+        Use the native solver's acceleration-safe braking bound.
+        """
+        return JerkLimitedBraking(
+            velocity_limit=velocity, jerk_limit=self.jerk, time_step=time_step
+        ).limited_to_acceleration(self.acceleration)
+
+
+@dataclass
+class RobocatMotionLimits(BaseVelocityLimits):
+    """
+    Speed and dynamics bounds matching the observed PAL base controller.
+    """
+
+    linear: RobocatAxisDynamics = field(
+        default_factory=lambda: RobocatAxisDynamics(acceleration=0.6, jerk=2.0)
+    )
+    """
+    PAL linear.x acceleration/deceleration and jerk bounds.
+    """
+
+    angular: RobocatAxisDynamics = field(
+        default_factory=lambda: RobocatAxisDynamics(acceleration=1.0, jerk=5.0)
+    )
+    """
+    PAL angular.z acceleration/deceleration and jerk bounds.
+    """
+
+    def apply_to(self, drive: DifferentialDrive) -> None:
+        """
+        Apply velocity bounds and PAL dynamics to the two controlled axes.
+        """
+        super().apply_to(drive)
+        self.linear.apply_to(drive.x_velocity)
+        self.angular.apply_to(drive.yaw)
+
+    def controller_configuration(
+        self, target_frequency: float = 20
+    ) -> QPControllerConfig:
+        """
+        Size the native QP horizon to contain braking of both controlled axes.
+        """
+        configuration = QPControllerConfig(target_frequency=target_frequency)
+        braking_steps = max(
+            self.linear.braking(
+                self.maximum_forward_velocity, configuration.control_time_step
+            ).number_of_steps,
+            self.angular.braking(
+                self.maximum_yaw_velocity, configuration.control_time_step
+            ).number_of_steps,
+        )
+        return replace(
+            configuration,
+            prediction_horizon=max(
+                configuration.prediction_horizon,
+                braking_steps + configuration.number_of_resting_steps,
+            ),
+        )
 
 
 # %% bridge-compatible sensor subscriptions
@@ -166,6 +259,9 @@ class RobocatBaseInterface(RobotInterfaceConfig):
             "base_feedback_topic", node.resolve_topic_name(RobocatTopic.ODOMETRY)
         )
         node.declare_parameter("base_command_topic", command_topic)
+        node.declare_parameter(
+            "wall_stop_supported", not self.server_config.is_standalone
+        )
         drive = self.world.get_connections_by_type(DifferentialDrive)[0]
         self.velocity_limits.apply_to(drive)
         if self.server_config.is_standalone:
@@ -188,12 +284,24 @@ class RobocatBaseInterface(RobotInterfaceConfig):
                 ),
             ),
         )
+        self.giskard.executor.context.add_extension(
+            MeasuredStopContext(feedback.interlocks)
+        )
         for source in (feedback.odometry, feedback.joints):
             self.motion_server.inputs.add_input(source)
             self.control_loop.inputs.add_input(source)
         self.robot.mobile_base.source = feedback.odometry
         self.robot.mobile_base.lidar.source = RobocatLidarSource(
             node=rospy.get_node(), topic_name="/scan"
+        )
+        self.giskard.executor.context.add_extension(
+            WallControlContext(
+                self.robot.mobile_base.lidar.source,
+                feedback.interlocks,
+                self.world.compute_forward_kinematics(
+                    self.robot.root, self.robot.mobile_base.lidar.root
+                ).to_np(),
+            )
         )
         self.control_loop.command_publishers.append(
             TiagoBaseCommandPublisher(

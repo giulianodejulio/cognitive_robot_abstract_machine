@@ -1,10 +1,15 @@
-# Robocat elevator test setup — 2026-11-16
+# Robocat elevator test setup — 2026-11-18
 
-This branch preserves the working setup used for Nav2 approach, SNM handover,
-Giskard straight entry, and the diagnostic bags. It does **not** fix the observed
-final overshoot: Giskard can report success after transient target attainment,
-while SNM rejects the later stationary pose. No HPM/person-perception integration
-is active. The known fault must remain visible when comparing future fixes.
+This branch preserves the current Nav2 approach, supervised SNM entry, Giskard
+wheel tracking with lidar-referenced longitudinal stopping, and optional 180-degree
+cabin turn. Real trials completed entry and turn with software success and no
+motor fault in the last recorded trial. This does not establish fault-free operation
+in all conditions. HPM/person perception, autonomous elevator travel, destination
+floor/map switching and exit are not implemented.
+
+The earlier transient-attainment/overshoot investigation remains in Git history.
+Current completion retains control through deceleration and requires measured rest;
+longitudinal arrival is assessed against the validated cabin back-wall reference.
 
 ## Required environment
 
@@ -51,7 +56,7 @@ location. Set the initial AMCL pose manually and verify the scan/map alignment.
 
 Prepare applies the experimentally validated wheel multipliers **2.0 / 2.0 /
 1.22**, with explicit APPLY authorization while stationary. Nav2 approach tests
-used its normal 0.20 m XY tolerance; exact SNM handover limits are CLI arguments.
+used its normal 0.20 m XY tolerance; the elevator profile requires staging position/orientation errors within 0.10 m / 10 degrees.
 Read-only preparation and SNM checks must pass before a motion request.
 
 ## Normal startup (host)
@@ -76,7 +81,7 @@ bash scripts/robocat-byobu
 Set/check localization in RViz. In the container SNM terminal:
 
 ```bash
-bash scripts/robocat-entry
+bash scripts/robocat-entry --profile elevator
 ```
 
 This is read-only. Handover and motion are explicitly authorized separately.
@@ -84,13 +89,42 @@ The following operator-run test assumes doors are held open, clear space,
 operator presence, teleop off and immediately reachable emergency stop:
 
 ```bash
-bash scripts/robocat-entry --execute --bootstrap-navigation \
-  --feedback wheel --retain-door-clearance \
-  --doorway-distance 0.86 --distance 1.30 \
-  --staging-position-tolerance 0.10 \
-  --staging-orientation-tolerance-deg 10 --doors-held-open \
-  --map-fingerprint 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda
+bash scripts/robocat-entry --profile elevator \
+  --execute --doors-held-open --bootstrap-navigation --turn-after-entry --verbose
 ```
+
+## Current calibration and behavior
+
+- `config/robocat_entry/elevator.yaml` contains the stable map fingerprint,
+  staging file, `elevator_inside` name, wheel feedback, 0.936 m base-to-back-wall
+  reference, 0.05 m longitudinal tolerance, and retained doorway authorization.
+  Execution, held-open doors and bootstrap authorization remain explicit CLI flags.
+- `elevator_inside` must exist in the native Eulero database on the configured
+  floor. `doc/robocat_elevator_inside.yaml` is a read-only export of its map pose;
+  it is evidence for restoration, not automatically imported or consumed by the
+  client. Register the waypoint in the correctly aligned floor before running.
+- Giskard uses PAL-compatible acceleration/jerk bounds: linear 0.6 m/s² and
+  2 m/s³, angular 1 rad/s² and 5 rad/s³; control is 20 Hz. Wheel multipliers remain
+  2.0 / 2.0 / 1.22. The calibrated lidar endpoint can adapt the nominal target by
+  at most 0.40 m. See `doc/robocat_snm.md` for validity and geometric bounds.
+- SNM associates scan/TF with historical odometry and evaluates one consistent
+  snapshot. Result freshness is checked after computation, with one bounded
+  re-evaluation; the 500 ms freshness limit is unchanged. Cached map distance
+  fields and sensor transforms reduce processing cost without weakening checks.
+- `--turn-after-entry` submits a separate native `CartesianOrientation` task,
+  with zero commanded linear velocity, only after verified longitudinal arrival
+  and rest. Its target is measured initial yaw plus pi. The progress/arrival error
+  is the shortest quaternion distance, independent of absolute heading.
+- The current-floor cabin-corner calibration is in
+  `config/robocat_entry/cabin_labora_floor.yaml`. Read `doc/robocat_cabin_frame.md`
+  before publishing it. The static preview is not an automatically tracked cabin
+  frame; stop it before changing floors/maps. The upper-floor calibration is pending.
+
+Motor discrepancy faults occurred in earlier trials and their hardware cause has
+not been established. The recorded latest successful trial is not a general motor
+reliability guarantee. Door retention is a held-open-door test assumption; there is
+no HPM-based passenger handling. The two odometry estimates can disagree, and the
+laser wall estimate is not an independent physical survey.
 
 ## Recording and shutdown
 
@@ -116,3 +150,13 @@ Confirm STOP as requested. Native shutdown restores normal laptop time sources.
 Do not kill the infra session directly; see the clock and lifecycle guides for
 recovery after abnormal termination. No sudoers/password-free helper is installed
 by this snapshot. Existing motor recovery remains an explicit guided operation.
+
+## Validation of this snapshot
+
+On 2026-11-18, 72 focused offline tests passed for profiles, timing, map/scan
+association, cached observation geometry, wall stopping/guards, recorder coverage,
+waypoint export and PAL dynamics. The copied runtime/test files were compared
+byte-for-byte with the tested live workspace; 54 copied Python files also passed
+syntax parsing. Earlier the same day, 40 orientation/turn-focused checks passed,
+including native QP half-turns from multiple initial headings. These are focused
+checks, not a full-workspace test run or a clean Docker image rebuild.

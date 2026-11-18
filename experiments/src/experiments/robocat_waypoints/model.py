@@ -88,6 +88,23 @@ class WaypointSnapshot:
 
 
 # %% static corridor preflight
+@dataclass(frozen=True)
+class MapDistanceField:
+    """
+    Obstacle distances for one exact occupancy-grid identity.
+    """
+
+    fingerprint: str
+    """
+    Map contents and geometry from which the field was calculated.
+    """
+
+    distances: np.ndarray
+    """
+    Distance to occupied, unknown or out-of-map space, in metres.
+    """
+
+
 @dataclass
 class WaypointMap:
     """
@@ -103,6 +120,36 @@ class WaypointMap:
     """
     Required static-map distance from the centreline to unavailable cells, in metres.
     """
+
+    prepared_clearance: MapDistanceField | None = field(
+        default=None, init=False, repr=False
+    )
+    """
+    Reusable static distance calculation, invalidated by any map-content change.
+    """
+
+    @property
+    def distance_field(self) -> np.ndarray:
+        """
+        Return obstacle distances, recalculating only when map geometry or contents
+        change.
+        """
+        identity = self.fingerprint
+        if (
+            self.prepared_clearance is None
+            or self.prepared_clearance.fingerprint != identity
+        ):
+            info = self.message.info
+            occupancy = np.asarray(self.message.data).reshape(info.height, info.width)
+            free = (occupancy >= 0) & (occupancy < 20)
+            distances = (
+                distance_transform_edt(np.pad(free, 1, constant_values=False))[
+                    1:-1, 1:-1
+                ]
+                * info.resolution
+            )
+            self.prepared_clearance = MapDistanceField(identity, distances)
+        return self.prepared_clearance.distances
 
     @property
     def fingerprint(self) -> str:
@@ -190,13 +237,7 @@ class WaypointMap:
             (columns < 0) | (columns >= info.width) | (rows < 0) | (rows >= info.height)
         ):
             return ["Path leaves the known map bounds"]
-        occupancy = np.asarray(self.message.data).reshape(info.height, info.width)
-        free = (occupancy >= 0) & (occupancy < 20)
-        distances = (
-            distance_transform_edt(np.pad(free, 1, constant_values=False))[1:-1, 1:-1]
-            * info.resolution
-        )
-        if np.any(distances[rows, columns] < self.clearance):
+        if np.any(self.distance_field[rows, columns] < self.clearance):
             return ["Path intersects unknown/occupied cells or lacks static clearance"]
         return []
 

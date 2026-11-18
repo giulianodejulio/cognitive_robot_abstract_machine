@@ -1,0 +1,13 @@
+# Calibration used by the successful open-door and closed-then-open entry trials.
+# The wall distance is measured from base_footprint, not from the lidar origin.
+staging: doc/robocat_elevator_staging.yaml
+inside_waypoint: elevator_inside
+feedback: wheel
+wall_stop_distance: 0.936
+doorway_distance: 0.86
+position_tolerance: 0.05
+orientation_tolerance_deg: 5.0
+staging_position_tolerance: 0.10
+staging_orientation_tolerance_deg: 10.0
+retain_door_clearance: true
+map_fingerprint: 14cae3e62b38495028d71f384a7bea50e41025b26b866dfbcf6107edb8961fda

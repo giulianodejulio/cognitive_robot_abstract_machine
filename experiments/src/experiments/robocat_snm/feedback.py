@@ -21,6 +21,12 @@ from tf2_ros import Buffer, TransformListener
 
 from coraplex.datastructures.dataclasses import Context
 from experiments.robocat_safety import RobocatFeedback, FeedbackSource
+from experiments.robocat_wall import (
+    WallStopSettings,
+    WallStopController,
+    WallTelemetry,
+    WallDiagnostic,
+)
 from experiments.robocat_snm.exceptions import EntryError
 from experiments.robocat_snm.geometry import (
     EntryAssessment,
@@ -29,7 +35,9 @@ from experiments.robocat_snm.geometry import (
     StagingAlignment,
 )
 from experiments.robocat_snm.policy import EntryObservation
+from experiments.robocat_snm.verbose import EntryTrace, SectionTrace
 from experiments.robocat_snm.odometry_history import OdometryHistory
+from experiments.robocat_snm.map_alignment import MapPoseAlignment
 from experiments.robocat_snm.pose_comparison import PoseComparison, PoseDiagnostic
 from experiments.tiago_goal_logging import PlanarPose
 from experiments.robocat_waypoints.model import WaypointMap, WaypointSnapshot
@@ -56,15 +64,6 @@ class EntryFeedback(RobocatFeedback):
     """
     Last observed driver error for each reported wheel actuator.
     """
-
-    wheel_history: OdometryHistory = field(default_factory=OdometryHistory, init=False)
-    """
-    Recent measured poses available for scan acquisition-time association.
-    """
-
-    def receive_wheels(self, message: Odometry) -> None:
-        super().receive_wheels(message)
-        self.wheel_history.samples.append(message)
 
     laser_history: OdometryHistory = field(default_factory=OdometryHistory, init=False)
     """
@@ -235,6 +234,22 @@ class EntryInputs:
     """
     Existing model/feedback disagreement limit in radians.
     """
+    wall_settings: WallStopSettings | None = None
+    """
+    Optional calibrated lidar stopping reference.
+    """
+    wall_controller: WallStopController | None = field(default=None, init=False)
+    """
+    Wheel-frame wall estimator initialized after verified handover.
+    """
+    wall_publisher: Publisher | None = field(default=None, init=False)
+    """
+    Recorded continuous wall target and measurement evidence.
+    """
+    trace: EntryTrace = field(default_factory=EntryTrace, init=False)
+    """
+    Evidence from the latest observation, independent of the acceptance policy.
+    """
 
     def __post_init__(self) -> None:
         self.feedback = EntryFeedback(self.node, active_priorities=("0", "10", "20"))
@@ -248,6 +263,9 @@ class EntryInputs:
         )
         self.source = RobocatLidarSource(node=self.node, topic_name="/scan")
         self.context.robot.mobile_base.lidar.source = self.source
+        self.wall_publisher = self.node.create_publisher(
+            DiagnosticArray, WallDiagnostic.TOPIC, QoSProfile(depth=10)
+        )
         self.comparison_publisher = self.node.create_publisher(
             DiagnosticArray, PoseDiagnostic.TOPIC, QoSProfile(depth=10)
         )
@@ -260,10 +278,17 @@ class EntryInputs:
         if self.scene is None or candidate.fingerprint != self.scene.fingerprint:
             self.scene = candidate
 
+    map_alignment: MapPoseAlignment | None = field(default=None, init=False)
+    """
+    Map pose and exact current feedback retained for the handover snapshot.
+    """
+
     def map_pose(self) -> Pose | None:
         """
-        Return the initial map pose only with synchronized selected odometry.
+        Align map TF with historical feedback and apply measured displacement to the
+        current sample.
         """
+        self.map_alignment = None
         odometry = self.pose_feedback
         if odometry is None:
             self.pose_blocker = f"{self.feedback_source.value} odometry missing"
@@ -277,11 +302,22 @@ class EntryInputs:
         now = self.node.get_clock().now().nanoseconds / 1e9
         if (
             abs(now - stamp) > self.maximum_pose_age
-            or abs(feedback_stamp - stamp) > self.maximum_skew
+            or abs(now - feedback_stamp) > self.maximum_age
         ):
             self.pose_blocker = (
                 f"TF age={now-stamp:.3f} s (limit={self.maximum_pose_age:.3f}); "
-                f"{self.feedback_source.value}/TF skew={feedback_stamp-stamp:.3f} s (limit={self.maximum_skew:.3f})"
+                f"{self.feedback_source.value} feedback age={now-feedback_stamp:.3f} s (limit={self.maximum_age:.3f})"
+            )
+            return None
+        matched = (
+            odometry
+            if abs(feedback_stamp - stamp) < 1e-6
+            else self.pose_history.nearest(stamp, self.maximum_skew)
+        )
+        if matched is None:
+            self.pose_blocker = (
+                f"No {self.feedback_source.value} sample matches TF acquisition: "
+                f"latest feedback/TF skew={feedback_stamp-stamp:.3f} s; matching limit={self.maximum_skew:.3f} s"
             )
             return None
         self.pose_blocker = None
@@ -289,7 +325,7 @@ class EntryInputs:
             transform.transform.translation,
             transform.transform.rotation,
         )
-        return Pose.from_xyz_quaternion(
+        map_at_tf = Pose.from_xyz_quaternion(
             translation.x,
             translation.y,
             translation.z,
@@ -298,6 +334,10 @@ class EntryInputs:
             rotation.z,
             rotation.w,
         )
+        self.map_alignment = MapPoseAlignment.from_samples(
+            map_at_tf, matched, odometry, self.context.world, stamp
+        )
+        return self.map_alignment.pose
 
     def confirm_handover(
         self, alignment: StagingAlignment | EntryGeometry, fingerprint: str
@@ -371,9 +411,33 @@ class EntryInputs:
         wheel_pose = PoseToSemDTConverter.convert(
             self.feedback.wheel_odometry.pose.pose, self.context.world
         )
-        selected_pose = PoseToSemDTConverter.convert(
-            self.pose_feedback.pose.pose, self.context.world
+        selected_message = (
+            self.pose_feedback
+            if self.map_alignment is None
+            else self.map_alignment.feedback
         )
+        selected_pose = PoseToSemDTConverter.convert(
+            selected_message.pose.pose, self.context.world
+        )
+        if self.map_alignment is not None:
+            print(
+                f"MAP ALIGNMENT: TF stamp={self.map_alignment.evidence.tf_stamp:.6f}; "
+                f"associated {self.feedback_source.value} stamp={self.map_alignment.evidence.association_stamp:.6f}; "
+                f"current feedback stamp={self.map_alignment.evidence.feedback_stamp:.6f}",
+                flush=True,
+            )
+            wheel_message = (
+                selected_message
+                if self.feedback_source is FeedbackSource.WHEEL
+                else self.feedback.wheel_history.nearest(
+                    self.map_alignment.evidence.feedback_stamp, self.maximum_skew
+                )
+            )
+            if wheel_message is None:
+                raise EntryError("No wheel sample matches the selected handover pose")
+            wheel_pose = PoseToSemDTConverter.convert(
+                wheel_message.pose.pose, self.context.world
+            )
         self.snapshot = WaypointSnapshot(
             start, wheel_pose, geometry.target, feedback_start=selected_pose
         )
@@ -382,12 +446,69 @@ class EntryInputs:
         ).feedback_target
         self.frozen_geometry = replace(geometry, staging=selected_staging)
         self.fingerprint = fingerprint
+        if self.wall_settings is not None:
+            self.wall_controller = WallStopController(
+                self.wall_settings,
+                PoseComparison.planar(self.snapshot.feedback_target),
+                self.context.world.compute_forward_kinematics(
+                    self.context.robot.root, self.context.robot.mobile_base.lidar.root
+                ).to_np(),
+            )
+
+    maximum_observation_attempts: int = 2
+    """
+    Bounded evaluations before an expired observation must block entry.
+    """
 
     def observe(self, navigation_idle: bool) -> EntryObservation:
+        """
+        Discard expired computations and require fresh evidence before returning a
+        verdict.
+        """
+        for attempt in range(self.maximum_observation_attempts):
+            observation = self.assess_feedback(navigation_idle)
+            checked_at = self.node.get_clock().now().nanoseconds / 1e9
+            self.trace.evaluated_at = checked_at
+            self.trace.attempts = attempt + 1
+            if not observation.healthy:
+                return observation
+            expired = [
+                f"{source} age={checked_at-stamp:.3f} s (limit={self.maximum_age:.3f} s)"
+                for source, stamp in (
+                    ("scan", self.trace.scan_stamp),
+                    (self.feedback_source.value, self.trace.wheel_stamp),
+                )
+                if math.isfinite(stamp) and abs(checked_at - stamp) > self.maximum_age
+            ]
+            if expired and attempt + 1 < self.maximum_observation_attempts:
+                continue
+            if expired:
+                self.last_assessment = None
+                self.last_reasons = self.last_reasons + [
+                    "Observation expired during evaluation: " + "; ".join(expired)
+                ]
+                return replace(
+                    observation,
+                    healthy=False,
+                    door_open=None,
+                    passage_clear=None,
+                    target_reached=False,
+                    fully_inside=False,
+                )
+            return observation
+        raise EntryError("The observation evaluation limit must be positive")
+
+    def assess_feedback(self, navigation_idle: bool) -> EntryObservation:
         """
         Assess only the remaining entry corridor and directly relevant interlocks.
         """
         self.last_assessment = None
+        self.trace = EntryTrace(
+            observed_at=self.node.get_clock().now().nanoseconds / 1e9,
+            maximum_age=self.maximum_age,
+            maximum_skew=self.maximum_skew,
+            wall_settings=self.wall_settings,
+        )
         geometry = self.frozen_geometry
         reasons = self.feedback.blocking_reasons(require_free_mux=False)
         if self.scene is None or self.scene.fingerprint != self.fingerprint:
@@ -400,14 +521,18 @@ class EntryInputs:
             return EntryObservation(
                 False, self.feedback.wheels_settled(), navigation_idle, None, None, 0
             )
-        measured_pose = PoseToSemDTConverter.convert(
-            odometry.pose.pose, self.context.world
+        wheel_odometry = (
+            odometry
+            if self.feedback_source is FeedbackSource.WHEEL
+            else self.feedback.wheel_odometry
         )
-        local = geometry.local_pose(measured_pose)
         scan = self.source.received_scan
         stamp = scan.header.stamp.sec + scan.header.stamp.nanosec / 1e9
         feedback_stamp = odometry.header.stamp.sec + odometry.header.stamp.nanosec / 1e9
         now = self.node.get_clock().now().nanoseconds / 1e9
+        self.trace.observed_at = now
+        self.trace.scan_stamp = stamp
+        self.trace.wheel_stamp = feedback_stamp
         if abs(now - stamp) > self.maximum_age:
             reasons.append(
                 f"Scan stale: age={now-stamp:.3f} s (limit={self.maximum_age:.3f} s)"
@@ -417,6 +542,10 @@ class EntryInputs:
                 f"{self.feedback_source.value} feedback stale: age={now-feedback_stamp:.3f} s "
                 f"(limit={self.maximum_age:.3f} s)"
             )
+        measured_pose = PoseToSemDTConverter.convert(
+            odometry.pose.pose, self.context.world
+        )
+        local = geometry.local_pose(measured_pose)
         model = self.context.robot.root.global_transform
         model_yaw = float(
             Pose(position=model.position, orientation=model.quaternion).yaw
@@ -441,12 +570,10 @@ class EntryInputs:
             position_limit_m=self.model_position_limit,
             yaw_limit_rad=self.model_yaw_limit,
             assessment=assessment,
+            map_alignment=(
+                None if self.map_alignment is None else self.map_alignment.evidence
+            ),
         )
-        if (
-            self.comparison_publisher is not None
-            and self.comparison_publisher.get_subscription_count() > 0
-        ):
-            self.comparison_publisher.publish(comparison.to_message())
         if comparison.disagrees:
             reasons.append(comparison.describe())
         if abs(float(local.y)) > geometry.half_width - 0.21 or abs(
@@ -456,6 +583,7 @@ class EntryInputs:
         self.last_reasons = reasons
         sample = scan.header.stamp.sec * 10**9 + scan.header.stamp.nanosec
         if reasons:
+            self.publish_comparison(comparison)
             return EntryObservation(
                 False,
                 self.feedback.wheels_settled(),
@@ -470,6 +598,7 @@ class EntryInputs:
             else self.pose_history.nearest(stamp, self.maximum_skew)
         )
         if matched is None:
+            self.publish_comparison(comparison)
             self.last_reasons = [
                 f"No {self.feedback_source.value} sample matches scan: latest odometry/scan skew="
                 f"{feedback_stamp-stamp:.3f} s (matching limit={self.maximum_skew:.3f} s)"
@@ -482,14 +611,106 @@ class EntryInputs:
                 None,
                 sample,
             )
+        self.trace.association_stamp = (
+            matched.header.stamp.sec + matched.header.stamp.nanosec / 1e9
+        )
         acquisition_pose = PoseToSemDTConverter.convert(
             matched.pose.pose, self.context.world
+        )
+        if self.wall_controller is not None:
+            wall = self.wall_controller.observe(
+                scan, wheel_odometry, self.feedback.wheel_history, now
+            )
+            self.trace.wall = wall
+            if self.wall_publisher is not None:
+                self.wall_publisher.publish(
+                    WallTelemetry(wall, self.wall_settings).to_message(now)
+                )
+            if not wall.valid:
+                self.publish_comparison(comparison)
+                self.last_reasons = ["Lidar stop feedback unavailable: " + wall.reason]
+                return EntryObservation(
+                    False,
+                    self.feedback.wheels_settled(),
+                    navigation_idle,
+                    None,
+                    None,
+                    sample,
+                )
+            nominal = self.wall_controller.nominal
+            remaining = (
+                wall.target_progress
+                - math.cos(nominal.yaw) * float(measured_pose.x)
+                - math.sin(nominal.yaw) * float(measured_pose.y)
+            )
+            target = Pose.from_xyz_rpy(
+                x=float(measured_pose.x) + math.cos(nominal.yaw) * remaining,
+                y=float(measured_pose.y) + math.sin(nominal.yaw) * remaining,
+                yaw=nominal.yaw,
+            )
+            if self.snapshot is None:
+                self.last_reasons = [
+                    "Wall stopping requires a frozen handover alignment"
+                ]
+                return EntryObservation(
+                    False,
+                    self.feedback.wheels_settled(),
+                    navigation_idle,
+                    None,
+                    None,
+                    sample,
+                )
+            map_T_target = (
+                self.snapshot.map_start.homogeneous_matrix
+                @ self.snapshot.feedback_start.homogeneous_matrix.inverse()
+                @ target.homogeneous_matrix
+            )
+            map_target = Pose(
+                position=map_T_target.position, orientation=map_T_target.quaternion
+            )
+            map_blockers = self.scene.blockers(self.snapshot.map_start, map_target)
+            if map_blockers:
+                self.last_reasons = map_blockers
+                return EntryObservation(
+                    False,
+                    self.feedback.wheels_settled(),
+                    navigation_idle,
+                    None,
+                    None,
+                    sample,
+                )
+            residual = geometry.local_pose(target)
+            geometry = replace(
+                geometry, distance=float(residual.x), target_lateral=float(residual.y)
+            )
+            self.frozen_geometry = geometry
+            assessment = replace(
+                geometry.assess(measured_pose),
+                wall_distance=wall.distance,
+                wall_reference=self.wall_settings.reference_distance,
+                wall_tolerance=self.wall_settings.tolerance,
+            )
+        self.publish_comparison(
+            replace(
+                comparison,
+                assessment=assessment,
+                geometry_target=PoseComparison.planar(geometry.target),
+            )
         )
         scan_to_current = model @ acquisition_pose.homogeneous_matrix.inverse()
         reading = self.source.get_lidar_reading(
             self.context.robot.mobile_base.lidar, scan=scan
         )
-        door = self.section_clear(reading, geometry.doorway_distance, scan_to_current)
+        sensor_T_staging = (
+            self.context.world.compute_forward_kinematics(
+                root=reading.reference_frame, tip=self.context.world.root
+            ).to_np()
+            @ scan_to_current.to_np()
+            @ geometry.staging.homogeneous_matrix.to_np()
+        )
+        door = self.section_clear(
+            reading, geometry.doorway_distance, sensor_T_staging=sensor_T_staging
+        )
         front = float(local.x) + geometry.front_extent + geometry.margin
         end = (
             geometry.distance
@@ -503,8 +724,14 @@ class EntryInputs:
             max(2, math.ceil(max(0, end - front) / geometry.section_spacing) + 1),
         )
         observations = [
-            self.section_clear(reading, float(section), scan_to_current)
+            self.section_clear(
+                reading, float(section), sensor_T_staging=sensor_T_staging
+            )
             for section in sections
+        ]
+        self.trace.sections = [
+            SectionTrace(float(section), verdict)
+            for section, verdict in zip(sections, observations)
         ]
         passage = (
             False if False in observations else None if None in observations else True
@@ -523,28 +750,51 @@ class EntryInputs:
             >= geometry.doorway_distance,
         )
 
+    def publish_comparison(self, comparison: PoseComparison) -> None:
+        """
+        Record the exact pose and final criterion used by this observation.
+        """
+        if (
+            self.comparison_publisher is not None
+            and self.comparison_publisher.get_subscription_count() > 0
+        ):
+            self.comparison_publisher.publish(comparison.to_message())
+
     def section_clear(
         self,
         reading: LidarReading,
         distance: float,
         scan_to_current: HomogeneousTransformationMatrix | None = None,
+        *,
+        sensor_T_staging: np.ndarray | None = None,
     ) -> bool | None:
         """
-        Assess one transverse corridor section in the frozen odometry reference.
+        Assess one section with native visibility and sensor-frame endpoints.
+
+        :param sensor_T_staging: Common acquisition-compensated transform for all
+            sections.
         """
         geometry = self.frozen_geometry
-        root_T_section = (
-            geometry.staging.homogeneous_matrix
-            @ Pose.from_xyz_rpy(x=distance).homogeneous_matrix
+        if sensor_T_staging is None:
+            sensor_T_root = self.context.world.compute_forward_kinematics(
+                root=reading.reference_frame, tip=self.context.world.root
+            ).to_np()
+            sensor_T_staging = (
+                sensor_T_root
+                @ (np.eye(4) if scan_to_current is None else scan_to_current.to_np())
+                @ geometry.staging.homogeneous_matrix.to_np()
+            )
+        endpoints = (
+            np.array(
+                [
+                    [distance, -geometry.half_width, 0, 1],
+                    [distance, geometry.half_width, 0, 1],
+                ]
+            )
+            @ sensor_T_staging.T
         )
-        if scan_to_current is not None:
-            root_T_section = scan_to_current @ root_T_section
-        points = [
-            root_T_section @ Point3(0, lateral, 0)
-            for lateral in (-geometry.half_width, geometry.half_width)
-        ]
         start, end = [
-            Point3(*point.to_np()[:3], reference_frame=self.context.world.root)
-            for point in points
+            Point3(*point[:3], reference_frame=reading.reference_frame)
+            for point in endpoints
         ]
         return self.visibility.evaluate(reading, start, end)
